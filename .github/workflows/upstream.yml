@@ -22,17 +22,24 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
           git config --global http.postBuffer 524288000
 
-      - name: Fetch and Squash Merge from Upstream
+      - name: Fetch, Check, and Push Upstream
         run: |
           git remote add upstream https://android.googlesource.com/kernel/common
           
           echo "Looking for the latest updates from upstream..."
           git fetch upstream android13-5.15-lts
           
-          git merge --squash upstream/android13-5.15-lts
+          git merge --squash upstream/android13-5.15-lts --allow-unrelated-histories || { echo "Merge error detected!"; exit 1; }
           
-          git commit -m "Merge upstream: android13-5.15-lts" || echo "No new updates, skip commit."
-          git push origin google
+          if git diff --staged --quiet; then
+            echo "The source kernel is already up-to-date with Google upstream. There is nothing to push."
+          else
+            echo "New changes found! Committing and pushing..."
+            
+            git commit -m "Merge upstream: android13-5.15-lts"
+            git push origin google
+            
+            echo "Push successful!"
+          fi
