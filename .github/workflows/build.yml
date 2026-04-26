@@ -63,7 +63,7 @@ jobs:
           rm -rf ./KernelSU ./KernelSU-Next ./drivers/kernelsu
           
           echo "Applying KernelSU-Next..."
-          curl -LSs "https://raw.githubusercontent.com/RapliVx/KernelSU-Next/refs/heads/hookless-susfs/kernel/setup.sh" | bash -s hookless-susfs
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
           
           echo "Patching All Managers Support..."
           if [ -d "KernelSU-Next" ]; then
