@@ -163,7 +163,7 @@ jobs:
           cp -f susfs/kernel_patches/include/linux/susfs_def.h include/linux/ || true
           cp -f susfs/kernel_patches/fs/susfs.c fs/
 
-      - name: "Apply SuSFS System Patches (KSUS Only)"
+      - name: "Apply SuSFS System Patches"
         if: matrix.variant == 'ksus'
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
@@ -200,6 +200,7 @@ jobs:
           fi
           sed -i '/CONFIG_KSU/d' "$CONFIG_FILE"
           if [ "${{ matrix.variant }}" == "ksus" ]; then
+             echo "Enabling KSU + SuSFS..."
              echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
              echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
              echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
@@ -217,6 +218,7 @@ jobs:
              echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
              echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$CONFIG_FILE"
           elif [ "${{ matrix.variant }}" == "ksu" ]; then
+             echo "Enabling KSU Only (SuSFS Disabled)..."
              echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
              echo "# CONFIG_KSU_SUSFS is not set" >> "$CONFIG_FILE"
           fi
