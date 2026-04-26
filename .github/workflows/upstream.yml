@@ -1,4 +1,4 @@
-name: Upstream Google Kernel 5.15 ACK (Squash)
+name: Upstream Google Kernel 5.15 ACK
 
 on:
   workflow_dispatch:
