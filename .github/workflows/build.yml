@@ -257,6 +257,7 @@ jobs:
       - name: "Create Variant Packages"
         run: |
           set -e
+          echo "CURRENT_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
           git clone --depth=1 https://github.com/RapliVx/AnyKernel3.git -b GKI ak3_base
           mkdir -p final_zips
           
@@ -267,8 +268,8 @@ jobs:
               cp -r ak3_base "ak3-$variant"
               cp -f "./artifacts/kernel-$variant/Image.$variant" "ak3-$variant/Image"
               
-              # ZIP it
-              ZIP_NAME="MikuKernel-${variant^^}-${{ github.event.inputs.kernelBranch }}-$(date +'%Y%m%d').zip"
+              # ZIP Name modified: Branch name removed
+              ZIP_NAME="MikuKernel-${variant^^}-$(date +'%Y%m%d').zip"
               cd "ak3-$variant"
               zip -r9 "../final_zips/$ZIP_NAME" * -x .git/* README.md
               cd ..
@@ -283,7 +284,7 @@ jobs:
           name: "Kernel Build: ${{ github.event.inputs.kernelBranch }} (#${{ github.run_number }})"
           body: |
             ### 🛠️ Build Information
-            - **Build Date:** $(date +'%Y-%m-%d')
+            - **Build Date:** ${{ env.CURRENT_DATE }}
             - **Device:** `${{ github.event.inputs.kernelDevice }}`
             - **Branch:** `${{ github.event.inputs.kernelBranch }}`
             - **LTO:** `${{ github.event.inputs.ltoType }}`
