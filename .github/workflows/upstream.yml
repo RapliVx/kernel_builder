@@ -24,22 +24,27 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global http.postBuffer 524288000
 
-      - name: Fetch, Check, and Push Upstream
+      - name: Exact Tree Mirror from Upstream
         run: |
           git remote add upstream https://android.googlesource.com/kernel/common
           
           echo "Looking for the latest updates from upstream..."
           git fetch upstream android13-5.15-lts
           
-          git merge --squash upstream/android13-5.15-lts --allow-unrelated-histories || { echo "Merge error detected!"; exit 1; }
+          UPSTREAM_TREE=$(git rev-parse upstream/android13-5.15-lts^{tree})
+          LOCAL_TREE=$(git rev-parse HEAD^{tree})
           
-          if git diff --staged --quiet; then
-            echo "The source kernel is already up-to-date with Google upstream. There is nothing to push."
+          if [ "$UPSTREAM_TREE" = "$LOCAL_TREE" ]; then
+            echo "The source kernel is already identical to Google's upstream. There's nothing to push."
           else
-            echo "New changes found! Committing and pushing..."
+            echo "Discrepancies found (Modified/Added/Deleted)! Performing mirror sync..."
             
-            git commit -m "Merge upstream: android13-5.15-lts"
+            COMMIT_MSG="Merge upstream: android13-5.15-lts"
+            NEW_COMMIT=$(git commit-tree "$UPSTREAM_TREE" -p HEAD -m "$COMMIT_MSG")
+            
+            git reset --hard "$NEW_COMMIT"
+            
             git push origin google
             
-            echo "Push successful!"
+            echo "Mirror sinkronisasi berhasil didorong ke upstream!"
           fi
