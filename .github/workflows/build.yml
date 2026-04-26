@@ -4,6 +4,8 @@ env:
   OUT_DIR: "out"
   KERNEL_VERSION: "5.15"
   ANDROID_VERSION: "13"
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
 on:
   workflow_dispatch:
@@ -84,73 +86,63 @@ jobs:
       fail-fast: false
       matrix:
         variant: ${{ fromJSON(
-          inputs.buildKSU == 'all' && '["vanilla", "ksu", "ksus"]' ||
-          inputs.buildKSU == 'vanilla' && '["vanilla"]' ||
-          inputs.buildKSU == 'ksu' && '["ksu"]' ||
+          github.event.inputs.buildKSU == 'all' && '["vanilla", "ksu", "ksus"]' ||
+          github.event.inputs.buildKSU == 'vanilla' && '["vanilla"]' ||
+          github.event.inputs.buildKSU == 'ksu' && '["ksu"]' ||
           '["ksus"]' ) }}
     env:
-      KERNEL_DIR: workspace
-      KERNEL_NAME: common
+      WORK_DIR: workspace
       DEFCONFIG_NAME: ${{ github.event.inputs.kernelDevice }}_defconfig
-      WORK_DIR: ${{ github.workspace }}
 
     steps:
-      - name: "Setup Workspace"
+      - name: "Setup Build Environment"
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y repo rsync aria2 build-essential bc curl flex cpio git zip dwarves libelf-dev gcc-aarch64-linux-gnu libssl-dev python3 clang lld llvm llvm-dev
           mkdir -p ${{ env.WORK_DIR }}
           echo "BUILD_TIME=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
 
-      - name: "Clone Kernel Source"
+      # ==========================================
+      # TOOLCHAIN & SYNC (LOGIKA ANTI-KONFLIK + Clang r547379)
+      # ==========================================
+      - name: "Sync AOSP Tools & Clang r547379"
+        if: github.event.inputs.buildToolchain == 'android-tools'
+        working-directory: ${{ env.WORK_DIR }}
+        run: |
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15-lts --depth=1
+          repo sync --optimized-fetch --prune --force-sync -j$(nproc --all)
+          
+          # Hapus folder kernel bawaan agar tidak konflik dengan git clone custom
+          rm -rf common
+          rm -rf .repo
+
+          # Download Clang r547379 sesuai permintaan tetap
+          aria2c -x 16 -s 16 -o clang.tar.gz "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
+          mkdir -p prebuilts/clang/host/linux-x86/clang-r547379
+          tar -xzf clang.tar.gz -C prebuilts/clang/host/linux-x86/clang-r547379
+          rm -f clang.tar.gz
+
+          # Update config constants ke r547379
+          sed -i 's/^CLANG_VERSION=.*/CLANG_VERSION=r547379/' build.config.constants || true
+
+      - name: "Clone Custom Kernel Source"
         working-directory: ${{ env.WORK_DIR }}
         run: |
           git clone --depth=1 --branch ${{ github.event.inputs.kernelBranch }} \
             ${{ github.event.inputs.kernelSourceURL }} common
 
-      # ==========================================
-      # TOOLCHAIN SETUP (AOSP TOOLS)
-      # ==========================================
-      - name: "Initialize AOSP Toolchain"
-        if: github.event.inputs.buildToolchain == 'android-tools'
-        working-directory: ${{ env.WORK_DIR }}
-        run: |
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15-lts --depth=1
-          repo sync --optimized-fetch --prune -j$(nproc --all)
-          rm -rf .repo
-
-          # Sync professional Clang r584948b
-          aria2c -x 16 -s 16 -o clang.tar.gz "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r584948b.tar.gz"
-          mkdir -p prebuilts/clang/host/linux-x86/clang-r584948b
-          tar -xzf clang.tar.gz -C prebuilts/clang/host/linux-x86/clang-r584948b
-          rm -f clang.tar.gz
-
-          # Environment cleanup
-          rm -rf prebuilts/clang/host/linux-x86/clang-3289846
-          rm -rf prebuilts/clang/host/linux-x86/clang-r450784e
-          rm -rf prebuilts/clang/host/linux-x86/clang-r547379
-
-          # Apply build config updates
-          sed -i 's/^CLANG_VERSION=.*/CLANG_VERSION=r584948b/' common/build.config.constants
-          sed -i '/^DEFCONFIG=gki_defconfig/d' common/build.config.gki
-          echo "DEFCONFIG=${{ env.DEFCONFIG_NAME }}" >> common/build.config.gki
-          sed -i '/^POST_DEFCONFIG_CMDS="check_defconfig"/d' common/build.config.gki
-
-      # ==========================================
-      # TOOLCHAIN SETUP (CUSTOM TOOLS)
-      # ==========================================
-      - name: "Retrieve Custom Toolchain"
+      - name: "Retrieve Custom Toolchain (If selected)"
         if: github.event.inputs.buildToolchain == 'custom-tools'
         run: |
           CLANG_URL=$(curl -sL "https://api.github.com/repos/greenforce-project/greenforce_clang/releases/latest" | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
           mkdir -p clang
-          wget -O "clang/clang.tar.gz" "$CLANG_URL"
+          wget -qO "clang/clang.tar.gz" "$CLANG_URL"
           tar -xf clang/clang.tar.gz -C clang
           CLANG_BIN=$(find $(pwd)/clang -type d -name "bin" | head -n 1)
           echo "CLANG_PATH=$CLANG_BIN" >> $GITHUB_ENV
           echo "$CLANG_BIN" >> $GITHUB_PATH
 
-      - name: "Setup Build Swap"
+      - name: "Setup Swap 20GB"
         uses: pierotofy/set-swap-space@master
         with:
           swap-size-gb: 20
@@ -158,7 +150,7 @@ jobs:
       # ==========================================
       # KERNELSU & SUSFS INTEGRATION
       # ==========================================
-      - name: "Apply KernelSU and SuSFS Patches"
+      - name: "Patch KernelSU & SuSFS"
         if: matrix.variant != 'vanilla'
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
@@ -168,7 +160,7 @@ jobs:
           echo "Applying KernelSU-Next (dev-susfs)..."
           curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
           
-          echo "Applying All Managers Support..."
+          echo "Applying All Managers Patch..."
           curl -LSs "https://raw.githubusercontent.com/rinnsakaguchi/builder/refs/heads/anisphia/kernel-patches/ksu/ksun-add-more-managers-support.patch" | patch -p1 -d KernelSU-Next
           
           if [ ! -L "drivers/kernelsu" ]; then
@@ -193,12 +185,10 @@ jobs:
         run: |
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
           
-          # Localversion
           if [ -n "${{ github.event.inputs.localVersion }}" ]; then
             echo "CONFIG_LOCALVERSION=\"${{ github.event.inputs.localVersion }}\"" >> "$CONFIG_FILE"
           fi
 
-          # LTO Setup
           sed -i '/CONFIG_LTO_CLANG/d' "$CONFIG_FILE"
           echo "CONFIG_LTO_CLANG=y" >> "$CONFIG_FILE"
           if [ "${{ github.event.inputs.ltoType }}" == "thin" ]; then
@@ -207,7 +197,6 @@ jobs:
             echo "CONFIG_LTO_CLANG_FULL=y" >> "$CONFIG_FILE"
           fi
 
-          # Optimization Level
           sed -i '/CONFIG_CC_OPTIMIZE_FOR/d' "$CONFIG_FILE"
           case "${{ github.event.inputs.optimizationLevel }}" in
             O2) echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$CONFIG_FILE" ;;
@@ -215,7 +204,6 @@ jobs:
             Os) echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> "$CONFIG_FILE" ;;
           esac
 
-          # Tick Rate
           if [ "${{ github.event.inputs.tickRate }}" != "default" ]; then
             HZ_VAL=$(echo "${{ github.event.inputs.tickRate }}" | sed 's/Hz//')
             sed -i '/CONFIG_HZ/d' "$CONFIG_FILE"
@@ -224,7 +212,6 @@ jobs:
             echo "CONFIG_HZ_$HZ_VAL=y" >> "$CONFIG_FILE"
           fi
 
-          # Enable KSU flags
           if [ "${{ matrix.variant }}" != "vanilla" ]; then
             sed -i '/CONFIG_KSU/d' "$CONFIG_FILE"
             echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
@@ -258,7 +245,7 @@ jobs:
         run: |
           mkdir -p output
           if [ "${{ github.event.inputs.buildToolchain }}" == "android-tools" ]; then
-            cp out/dist/Image output/Image.${{ matrix.variant }}
+            cp workspace/out/dist/Image output/Image.${{ matrix.variant }} || cp out/dist/Image output/Image.${{ matrix.variant }}
           else
             cp workspace/common/arch/arm64/boot/Image output/Image.${{ matrix.variant }}
           fi
@@ -282,27 +269,25 @@ jobs:
 
       - name: "Package AnyKernel3"
         run: |
-          git clone --depth=1 https://github.com/topnotchfreaks/AnyKernel3 -b master AnyKernel3
+          git clone --depth=1 https://github.com/RapliVx/AnyKernel3.git -b GKI AnyKernel3
           find kernels -name "Image.*" -exec cp {} AnyKernel3/Image \;
           
-          ZIP_NAME="Kernel_${{ github.event.inputs.kernelBranch }}_$(date +'%Y%m%d').zip"
+          ZIP_NAME="MikuKernel_${{ github.event.inputs.kernelBranch }}_$(date +'%Y-%m-%d').zip"
           cd AnyKernel3
-          zip -r9 "../$ZIP_NAME" * -x .git/*
+          zip -r9 "../$ZIP_NAME" * -x .git/* README.md
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "ZIP_PATH=$(pwd)/../$ZIP_NAME" >> $GITHUB_ENV
 
-      - name: "Send Notification to Telegram"
+      - name: "Send Telegram Notification"
         run: |
-          CAPTION="✅ *Kernel Build Successful*
+          CAPTION="✅ *Advanced Kernel Build Successful*
           
           • *Branch:* \`${{ github.event.inputs.kernelBranch }}\`
+          • *Clang:* \`r547379\`
           • *Device:* \`${{ github.event.inputs.kernelDevice }}\`
-          • *Optimization:* \`${{ github.event.inputs.optimizationLevel }}\`
-          • *LTO:* \`${{ github.event.inputs.ltoType }}\`
-          • *Tick Rate:* \`${{ github.event.inputs.tickRate }}\`
-          • *Toolchain:* \`${{ github.event.inputs.buildToolchain }}\`
+          • *Build Type:* \`${{ github.event.inputs.buildKSU }}\`
           
-          *Modules:* KernelSU-Next, SuSFS (where applicable)."
+          *Modules:* KernelSU-Next, SuSFS."
 
           curl -s -F document=@"${{ env.ZIP_PATH }}" \
             -F caption="$CAPTION" \
