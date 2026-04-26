@@ -1,0 +1,34 @@
+name: Upstream Google Kernel 5.15 ACK
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0'
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: google
+          fetch-depth: 0
+
+      - name: Setup Git Configuration
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global pull.rebase false
+
+      - name: Fetch and Sync from Upstream
+        run: |
+          git remote add upstream https://android.googlesource.com/kernel/common
+          
+          echo "Looking for the latest updates from upstream..."
+          git fetch upstream common-android13-5.15-lts     
+          git reset --hard upstream/common-android13-5.15-lts
+          git push origin google --force
