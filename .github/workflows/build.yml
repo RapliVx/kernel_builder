@@ -1,4 +1,4 @@
-name: "Advanced Kernel Build"
+name: "Kernel Build"
 
 env:
   OUT_DIR: "out"
@@ -102,27 +102,18 @@ jobs:
           mkdir -p ${{ env.WORK_DIR }}
           echo "BUILD_TIME=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
 
-      # ==========================================
-      # TOOLCHAIN & SYNC (LOGIKA ANTI-KONFLIK + Clang r547379)
-      # ==========================================
       - name: "Sync AOSP Tools & Clang r547379"
         if: github.event.inputs.buildToolchain == 'android-tools'
         working-directory: ${{ env.WORK_DIR }}
         run: |
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15-lts --depth=1
           repo sync --optimized-fetch --prune --force-sync -j$(nproc --all)
-          
-          # Hapus folder kernel bawaan agar tidak konflik dengan git clone custom
           rm -rf common
           rm -rf .repo
-
-          # Download Clang r547379 sesuai permintaan tetap
           aria2c -x 16 -s 16 -o clang.tar.gz "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
           mkdir -p prebuilts/clang/host/linux-x86/clang-r547379
           tar -xzf clang.tar.gz -C prebuilts/clang/host/linux-x86/clang-r547379
           rm -f clang.tar.gz
-
-          # Update config constants ke r547379
           sed -i 's/^CLANG_VERSION=.*/CLANG_VERSION=r547379/' build.config.constants || true
 
       - name: "Clone Custom Kernel Source"
@@ -147,48 +138,51 @@ jobs:
         with:
           swap-size-gb: 20
 
-      # ==========================================
-      # KERNELSU & SUSFS INTEGRATION
-      # ==========================================
-      - name: "Patch KernelSU & SuSFS"
+      - name: "Integrate KernelSU-Next"
         if: matrix.variant != 'vanilla'
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
           set -e
           rm -rf ./KernelSU ./KernelSU-Next ./drivers/kernelsu
-          
           echo "Applying KernelSU-Next (dev-susfs)..."
           curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
-          
           echo "Applying All Managers Patch..."
           curl -LSs "https://raw.githubusercontent.com/rinnsakaguchi/builder/refs/heads/anisphia/kernel-patches/ksu/ksun-add-more-managers-support.patch" | patch -p1 -d KernelSU-Next
-          
           if [ ! -L "drivers/kernelsu" ]; then
              ln -sf ../KernelSU-Next drivers/kernelsu
           fi
 
-          if [ "${{ matrix.variant }}" == "ksus" ]; then
-              echo "Integrating SuSFS drivers..."
-              git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs
-              patch -p1 < susfs/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || true
-              cp -f susfs/kernel_patches/fs/susfs.c fs/susfs.c
-              cp -f susfs/kernel_patches/include/linux/susfs.h include/linux/susfs.h
-              cp -f susfs/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h || true
-              rm -rf susfs
-          fi
+      - name: "Provide SuSFS Headers (Fix for KSU & KSUS)"
+        if: matrix.variant != 'vanilla'
+        working-directory: ${{ env.WORK_DIR }}/common
+        run: |
+          echo "Retrieving SuSFS components..."
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs
+          mkdir -p include/linux fs
+          cp -f susfs/kernel_patches/include/linux/susfs.h include/linux/
+          cp -f susfs/kernel_patches/include/linux/susfs_def.h include/linux/ || true
+          cp -f susfs/kernel_patches/fs/susfs.c fs/
+          echo "SuSFS Headers provided to prevent build errors."
 
-      # ==========================================
-      # CONFIGURATION TUNING
-      # ==========================================
+      - name: "Apply SuSFS System Patches (KSUS Only)"
+        if: matrix.variant == 'ksus'
+        working-directory: ${{ env.WORK_DIR }}/common
+        run: |
+          echo "Patching kernel system files for SuSFS..."
+          patch -p1 < susfs/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || echo "Hunks failed but continuing..."
+          rm -rf susfs
+
       - name: "Configure Kernel Features"
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
           
+          # Localversion
           if [ -n "${{ github.event.inputs.localVersion }}" ]; then
             echo "CONFIG_LOCALVERSION=\"${{ github.event.inputs.localVersion }}\"" >> "$CONFIG_FILE"
           fi
 
+          # LTO Setup
           sed -i '/CONFIG_LTO_CLANG/d' "$CONFIG_FILE"
           echo "CONFIG_LTO_CLANG=y" >> "$CONFIG_FILE"
           if [ "${{ github.event.inputs.ltoType }}" == "thin" ]; then
@@ -197,6 +191,7 @@ jobs:
             echo "CONFIG_LTO_CLANG_FULL=y" >> "$CONFIG_FILE"
           fi
 
+          # Optimization & Tick Rate
           sed -i '/CONFIG_CC_OPTIMIZE_FOR/d' "$CONFIG_FILE"
           case "${{ github.event.inputs.optimizationLevel }}" in
             O2) echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$CONFIG_FILE" ;;
@@ -212,43 +207,42 @@ jobs:
             echo "CONFIG_HZ_$HZ_VAL=y" >> "$CONFIG_FILE"
           fi
 
-          if [ "${{ matrix.variant }}" != "vanilla" ]; then
-            sed -i '/CONFIG_KSU/d' "$CONFIG_FILE"
-            echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-            if [ "${{ matrix.variant }}" == "ksus" ]; then
-               echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
-               echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
-               echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
-               echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
-            fi
+          sed -i '/CONFIG_KSU/d' "$CONFIG_FILE"
+          if [ "${{ matrix.variant }}" == "ksus" ]; then
+             echo "Enabling KSU + SuSFS..."
+             echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$CONFIG_FILE"
+          elif [ "${{ matrix.variant }}" == "ksu" ]; then
+             echo "Enabling KSU Only (SuSFS Disabled)..."
+             echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+             echo "# CONFIG_KSU_SUSFS is not set" >> "$CONFIG_FILE"
           fi
 
-      # ==========================================
-      # COMPILATION
-      # ==========================================
-      - name: "Build Kernel (AOSP Tools)"
-        if: github.event.inputs.buildToolchain == 'android-tools'
+      - name: "Build Kernel"
         working-directory: ${{ env.WORK_DIR }}
         run: |
           LTO=${{ github.event.inputs.ltoType }} \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
           build/build.sh -j$(nproc --all)
 
-      - name: "Build Kernel (Custom Tools)"
-        if: github.event.inputs.buildToolchain == 'custom-tools'
-        working-directory: ${{ env.WORK_DIR }}/common
-        run: |
-          make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- ${{ env.DEFCONFIG_NAME }}
-          make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc --all)
-
       - name: "Prepare Artifact"
         run: |
           mkdir -p output
-          if [ "${{ github.event.inputs.buildToolchain }}" == "android-tools" ]; then
-            cp workspace/out/dist/Image output/Image.${{ matrix.variant }} || cp out/dist/Image output/Image.${{ matrix.variant }}
-          else
-            cp workspace/common/arch/arm64/boot/Image output/Image.${{ matrix.variant }}
-          fi
+          cp workspace/out/dist/Image output/Image.${{ matrix.variant }} || cp out/dist/Image output/Image.${{ matrix.variant }}
 
       - name: "Upload Build Artifact"
         uses: actions/upload-artifact@v4
@@ -271,7 +265,6 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/RapliVx/AnyKernel3.git -b GKI AnyKernel3
           find kernels -name "Image.*" -exec cp {} AnyKernel3/Image \;
-          
           ZIP_NAME="MikuKernel_${{ github.event.inputs.kernelBranch }}_$(date +'%Y-%m-%d').zip"
           cd AnyKernel3
           zip -r9 "../$ZIP_NAME" * -x .git/* README.md
@@ -283,11 +276,13 @@ jobs:
           CAPTION="✅ *Advanced Kernel Build Successful*
           
           • *Branch:* \`${{ github.event.inputs.kernelBranch }}\`
-          • *Clang:* \`r547379\`
           • *Device:* \`${{ github.event.inputs.kernelDevice }}\`
+          • *Optimization:* \`${{ github.event.inputs.optimizationLevel }}\`
+          • *LTO:* \`${{ github.event.inputs.ltoType }}\`
+          • *Tick Rate:* \`${{ github.event.inputs.tickRate }}\`
           • *Build Type:* \`${{ github.event.inputs.buildKSU }}\`
           
-          *Modules:* KernelSU-Next, SuSFS."
+          *Modules:* KernelSU-Next (dev-susfs). SuSFS state depends on variant."
 
           curl -s -F document=@"${{ env.ZIP_PATH }}" \
             -F caption="$CAPTION" \
