@@ -55,18 +55,35 @@ jobs:
         run: |
           git clone --depth=1 -b ${{ github.event.inputs.KERNEL_BRANCH }} ${{ github.event.inputs.KERNEL_REPO }} common
 
+      # ==========================================
+      # PATCHING: BASE KERNELSU (KSU & KSUS)
+      # ==========================================
       - name: "Apply Base KernelSU-Next"
         working-directory: ${{ env.WORK_DIR }}/common
         if: ${{ matrix.variant != 'Miku-NonKSU' }}
         run: |
           set -e
-          rm -rf ./KernelSU ./drivers/kernelsu ./MamboSU
+          rm -rf ./KernelSU ./KernelSU-Next ./drivers/kernelsu
           
-          echo "Applying KernelSU-Next.."
-           curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+          echo "Applying KernelSU-Next..."
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+          
+          echo "Patching All Managers Support..."
+          if [ -d "KernelSU-Next" ]; then
+              curl -LSs "https://raw.githubusercontent.com/rinnsakaguchi/builder/refs/heads/anisphia/kernel-patches/ksu/ksun-add-more-managers-support.patch" | patch -p1 -d KernelSU-Next
+          elif [ -d "KernelSU" ]; then
+              curl -LSs "https://raw.githubusercontent.com/rinnsakaguchi/builder/refs/heads/anisphia/kernel-patches/ksu/ksun-add-more-managers-support.patch" | patch -p1 -d KernelSU
+          else
+              echo "Error: KernelSU-Next directory not found!"
+              exit 1
+          fi
           
           if [ ! -L "drivers/kernelsu" ]; then
-             ln -sf ../KernelSU drivers/kernelsu
+             if [ -d "KernelSU-Next" ]; then
+                 ln -sf ../KernelSU-Next drivers/kernelsu
+             else
+                 ln -sf ../KernelSU drivers/kernelsu
+             fi
           fi
 
           echo "Cleaning base configurations..."
@@ -74,6 +91,9 @@ jobs:
           sed -i '/CONFIG_KPROBES/d' arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           sed -i '/CONFIG_KALLSYMS/d' arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
 
+      # ==========================================
+      # PATCHING: SUSFS (HANYA KSUS)
+      # ==========================================
       - name: "Apply SuSFS Configuration"
         working-directory: ${{ env.WORK_DIR }}/common
         if: ${{ matrix.variant == 'Miku-KSUS' }}
@@ -120,6 +140,9 @@ jobs:
           rm -rf susfs4ksu
           echo "KernelSU and SuSFS patches applied successfully."
 
+      # ==========================================
+      # PATCHING: STANDARD KSU (HANYA KSU)
+      # ==========================================
       - name: "Apply Standard KernelSU Configuration"
         working-directory: ${{ env.WORK_DIR }}/common
         if: ${{ matrix.variant == 'Miku-KSU' }}
@@ -138,6 +161,9 @@ jobs:
           
           echo "Standard KernelSU configuration applied."
 
+      # ==========================================
+      # COMPILATION
+      # ==========================================
       - name: "Compile Kernel"
         working-directory: ${{ env.WORK_DIR }}
         run: |
@@ -159,6 +185,9 @@ jobs:
           path: ${{ env.WORK_DIR }}/out/dist/${{ env.OUTPUT_NAME }}
           retention-days: 1
 
+  # ==========================================
+  # PACKAGING & DEPLOYMENT
+  # ==========================================
   package-kernels:
     name: "Package AnyKernel3 Zips"
     runs-on: ubuntu-latest
