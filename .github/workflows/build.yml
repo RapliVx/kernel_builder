@@ -175,13 +175,9 @@ jobs:
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          
-          # Localversion
           if [ -n "${{ github.event.inputs.localVersion }}" ]; then
             echo "CONFIG_LOCALVERSION=\"${{ github.event.inputs.localVersion }}\"" >> "$CONFIG_FILE"
           fi
-
-          # LTO Setup
           sed -i '/CONFIG_LTO_CLANG/d' "$CONFIG_FILE"
           echo "CONFIG_LTO_CLANG=y" >> "$CONFIG_FILE"
           if [ "${{ github.event.inputs.ltoType }}" == "thin" ]; then
@@ -189,15 +185,12 @@ jobs:
           else
             echo "CONFIG_LTO_CLANG_FULL=y" >> "$CONFIG_FILE"
           fi
-
-          # Optimization & Tick Rate
           sed -i '/CONFIG_CC_OPTIMIZE_FOR/d' "$CONFIG_FILE"
           case "${{ github.event.inputs.optimizationLevel }}" in
             O2) echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$CONFIG_FILE" ;;
             O3) echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y" >> "$CONFIG_FILE" ;;
             Os) echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> "$CONFIG_FILE" ;;
           esac
-
           if [ "${{ github.event.inputs.tickRate }}" != "default" ]; then
             HZ_VAL=$(echo "${{ github.event.inputs.tickRate }}" | sed 's/Hz//')
             sed -i '/CONFIG_HZ/d' "$CONFIG_FILE"
@@ -205,10 +198,8 @@ jobs:
             echo "CONFIG_HZ=$HZ_VAL" >> "$CONFIG_FILE"
             echo "CONFIG_HZ_$HZ_VAL=y" >> "$CONFIG_FILE"
           fi
-
           sed -i '/CONFIG_KSU/d' "$CONFIG_FILE"
           if [ "${{ matrix.variant }}" == "ksus" ]; then
-             echo "Enabling KSU + SuSFS..."
              echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
              echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
              echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
@@ -226,7 +217,6 @@ jobs:
              echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
              echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$CONFIG_FILE"
           elif [ "${{ matrix.variant }}" == "ksu" ]; then
-             echo "Enabling KSU Only (SuSFS Disabled)..."
              echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
              echo "# CONFIG_KSU_SUSFS is not set" >> "$CONFIG_FILE"
           fi
@@ -251,40 +241,76 @@ jobs:
           retention-days: 1
 
   package-release:
-    name: "Package and Notify"
+    name: "Release Packaging"
     runs-on: ubuntu-latest
     needs: build-kernel
+    permissions:
+      contents: write
     steps:
-      - name: "Download Kernels"
+      - name: "Download Built Kernels"
         uses: actions/download-artifact@v4
         with:
-          path: ./kernels/
+          path: ./artifacts/
 
-      - name: "Package AnyKernel3"
+      - name: "Create Variant Packages"
         run: |
-          git clone --depth=1 https://github.com/RapliVx/AnyKernel3.git -b GKI AnyKernel3
-          find kernels -name "Image.*" -exec cp {} AnyKernel3/Image \;
-          ZIP_NAME="MikuKernel_${{ github.event.inputs.kernelBranch }}_$(date +'%Y-%m-%d').zip"
-          cd AnyKernel3
-          zip -r9 "../$ZIP_NAME" * -x .git/* README.md
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          echo "ZIP_PATH=$(pwd)/../$ZIP_NAME" >> $GITHUB_ENV
+          set -e
+          git clone --depth=1 https://github.com/RapliVx/AnyKernel3.git -b GKI ak3_base
+          mkdir -p final_zips
+          
+          # Loop through variants and package them separately
+          for variant in vanilla ksu ksus; do
+            if [ -d "./artifacts/kernel-$variant" ]; then
+              echo "Packaging variant: $variant"
+              cp -r ak3_base "ak3-$variant"
+              cp -f "./artifacts/kernel-$variant/Image.$variant" "ak3-$variant/Image"
+              
+              # ZIP it
+              ZIP_NAME="MikuKernel-${variant^^}-${{ github.event.inputs.kernelBranch }}-$(date +'%Y%m%d').zip"
+              cd "ak3-$variant"
+              zip -r9 "../final_zips/$ZIP_NAME" * -x .git/* README.md
+              cd ..
+            fi
+          done
 
-      - name: "Send Telegram Notification"
+      - name: "Push to GitHub Release"
+        uses: softprops/action-gh-release@v2
+        with:
+          files: final_zips/*.zip
+          tag_name: "Build-${{ github.run_number }}-${{ github.sha }}"
+          name: "Kernel Build: ${{ github.event.inputs.kernelBranch }} (#${{ github.run_number }})"
+          body: |
+            ### 🛠️ Build Information
+            - **Build Date:** $(date +'%Y-%m-%d')
+            - **Device:** `${{ github.event.inputs.kernelDevice }}`
+            - **Branch:** `${{ github.event.inputs.kernelBranch }}`
+            - **LTO:** `${{ github.event.inputs.ltoType }}`
+            - **Tick Rate:** `${{ github.event.inputs.tickRate }}`
+            - **Optimization:** `${{ github.event.inputs.optimizationLevel }}`
+            - **Source:** ${{ github.event.inputs.kernelSourceURL }}
+            
+            ### 📦 Artifacts Detail
+            1. **Vanilla:** Stock Infrastructure.
+            2. **KSU:** KernelSU-Next.
+            3. **KSUS:** KernelSU-Next with SuSFS Injection.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Send Telegram Status"
+        if: success()
         run: |
-          CAPTION="✅ *Advanced Kernel Build Successful*
+          cd final_zips
+          LIST=""
+          for f in *.zip; do LIST="${LIST}📦 <code>${f}</code>%0A"; done
           
-          • *Branch:* \`${{ github.event.inputs.kernelBranch }}\`
-          • *Device:* \`${{ github.event.inputs.kernelDevice }}\`
-          • *Optimization:* \`${{ github.event.inputs.optimizationLevel }}\`
-          • *LTO:* \`${{ github.event.inputs.ltoType }}\`
-          • *Tick Rate:* \`${{ github.event.inputs.tickRate }}\`
-          • *Build Type:* \`${{ github.event.inputs.buildKSU }}\`
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/Build-${{ github.run_number }}-${{ github.sha }}"
+          MSG="<b>✅ Kernel Build Completed</b>%0A%0A"
+          MSG="${MSG}<b>Device:</b> ${{ github.event.inputs.kernelDevice }}%0A"
+          MSG="${MSG}<b>Branch:</b> ${{ github.event.inputs.kernelBranch }}%0A%0A"
+          MSG="${MSG}<b>Generated Packages:</b>%0A${LIST}%0A"
+          MSG="${MSG}🔗 <a href='${RELEASE_URL}'>Download from GitHub Releases</a>"
           
-          *Modules:* KernelSU-Next (dev-susfs). SuSFS state depends on variant."
-
-          curl -s -F document=@"${{ env.ZIP_PATH }}" \
-            -F caption="$CAPTION" \
-            -F parse_mode="Markdown" \
-            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument"
+          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ env.TELEGRAM_CHAT_ID }}" \
+            -d text="${MSG}" \
+            -d parse_mode="HTML" \
+            -d disable_web_page_preview=true
