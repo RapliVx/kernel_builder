@@ -169,15 +169,6 @@ jobs:
           patch -p1 < susfs/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || echo "Hunks failed but continuing..."
           rm -rf susfs
 
-      - name: "Add BBG Support"
-        if: matrix.variant == 'ksu'
-        working-directory: ${{ env.WORK_DIR }}/common
-        run: |
-          echo "Adding Baseband Guard (BBG)...";
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-          echo "CONFIG_BBG=y" >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-
       - name: "Configure Kernel Features"
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
@@ -305,7 +296,7 @@ jobs:
             
             ### 📦 Artifacts Detail
             1. **Vanilla:** Pure Stock Infrastructure.
-            2. **KSU:** KernelSU-Next with SuSFS Injection & Baseband Guard.
+            2. **KSU:** KernelSU-Next with SuSFS Injection.
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: "Send Telegram Status"
