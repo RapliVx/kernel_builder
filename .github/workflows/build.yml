@@ -259,6 +259,13 @@ jobs:
           set -e
           echo "CURRENT_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
           git clone --depth=1 https://github.com/RapliVx/AnyKernel3.git -b GKI ak3_base
+          cat << 'EOF' > ak3_base/banner
+           --------------------------------------- 
+                                                   
+                  M I K U   K E R N E L            
+                                                   
+           --------------------------------------- 
+          EOF
           mkdir -p final_zips
           
           # Loop through variants and package them separately
