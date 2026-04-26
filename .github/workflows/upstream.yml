@@ -1,4 +1,4 @@
-name: Upstream Google Kernel 5.15 ACK
+name: Upstream Google Kernel 5.15 ACK (Squash)
 
 on:
   workflow_dispatch:
@@ -22,12 +22,17 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global pull.rebase false
+          
+          git config --global http.postBuffer 524288000
 
-      - name: Fetch and Sync from Upstream
+      - name: Fetch and Squash Merge from Upstream
         run: |
           git remote add upstream https://android.googlesource.com/kernel/common
+          
           echo "Looking for the latest updates from upstream..."
           git fetch upstream android13-5.15-lts
-          git reset --hard upstream/android13-5.15-lts
-          git push origin google --force
+          
+          git merge --squash upstream/android13-5.15-lts
+          
+          git commit -m "Merge upstream: android13-5.15-lts" || echo "No new updates, skip commit."
+          git push origin google
