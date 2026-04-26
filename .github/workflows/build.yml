@@ -60,27 +60,13 @@ jobs:
         if: ${{ matrix.variant != 'Miku-NonKSU' }}
         run: |
           set -e
-          rm -rf ./KernelSU ./KernelSU-Next ./drivers/kernelsu
+          rm -rf ./KernelSU ./drivers/kernelsu ./MamboSU
           
-          echo "Applying KernelSU-Next..."
-          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
-          
-          echo "Patching All Managers Support..."
-          if [ -d "KernelSU-Next" ]; then
-              curl -LSs "https://raw.githubusercontent.com/rinnsakaguchi/builder/refs/heads/anisphia/kernel-patches/ksu/ksun-add-more-managers-support.patch" | patch -p1 -d KernelSU-Next
-          elif [ -d "KernelSU" ]; then
-              curl -LSs "https://raw.githubusercontent.com/rinnsakaguchi/builder/refs/heads/anisphia/kernel-patches/ksu/ksun-add-more-managers-support.patch" | patch -p1 -d KernelSU
-          else
-              echo "Error: KernelSU-Next directory not found!"
-              exit 1
-          fi
+          echo "Applying KernelSU-Next.."
+           curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
           
           if [ ! -L "drivers/kernelsu" ]; then
-             if [ -d "KernelSU-Next" ]; then
-                 ln -sf ../KernelSU-Next drivers/kernelsu
-             else
-                 ln -sf ../KernelSU drivers/kernelsu
-             fi
+             ln -sf ../KernelSU drivers/kernelsu
           fi
 
           echo "Cleaning base configurations..."
