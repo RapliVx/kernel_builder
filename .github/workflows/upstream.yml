@@ -27,8 +27,7 @@ jobs:
       - name: Fetch and Sync from Upstream
         run: |
           git remote add upstream https://android.googlesource.com/kernel/common
-          
           echo "Looking for the latest updates from upstream..."
-          git fetch upstream common-android13-5.15-lts     
-          git reset --hard upstream/common-android13-5.15-lts
+          git fetch upstream android13-5.15-lts
+          git reset --hard upstream/android13-5.15-lts
           git push origin google --force
