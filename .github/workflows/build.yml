@@ -55,7 +55,7 @@ jobs:
         run: |
           git clone --depth=1 -b ${{ github.event.inputs.KERNEL_BRANCH }} ${{ github.event.inputs.KERNEL_REPO }} common
 
-      - name: "Apply KernelSU and SuSFS Patches"
+      - name: "Apply Base KernelSU-Next"
         working-directory: ${{ env.WORK_DIR }}/common
         if: ${{ matrix.variant != 'Miku-NonKSU' }}
         run: |
@@ -88,23 +88,25 @@ jobs:
           sed -i '/CONFIG_KPROBES/d' arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           sed -i '/CONFIG_KALLSYMS/d' arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
 
-          if [ "${{ matrix.variant }}" == "Miku-KSUS" ]; then
-              
-              echo "Retrieving SuSFS drivers..."
-              git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
-              
-              SUSFS_PATCH="susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-              if [ -f "$SUSFS_PATCH" ]; then
-                 patch -p1 --forward < "$SUSFS_PATCH" || echo "Patch conflict ignored."
-              fi
-              
-              mkdir -p fs include/linux
-              cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
-              cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
-              cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h || true
-              
-              echo "Applying SuSFS configurations..."
-              cat >> "arch/arm64/configs/${{ env.DEFCONFIG_NAME }}" << 'EOF'
+      - name: "Apply SuSFS Configuration"
+        working-directory: ${{ env.WORK_DIR }}/common
+        if: ${{ matrix.variant == 'Miku-KSUS' }}
+        run: |
+          echo "Retrieving SuSFS drivers..."
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
+          
+          SUSFS_PATCH="susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+          if [ -f "$SUSFS_PATCH" ]; then
+             patch -p1 --forward < "$SUSFS_PATCH" || echo "Patch conflict ignored."
+          fi
+          
+          mkdir -p fs include/linux
+          cp -f susfs4ksu/kernel_patches/fs/susfs.c fs/susfs.c
+          cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
+          cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h || true
+          
+          echo "Applying SuSFS configurations..."
+          cat >> "arch/arm64/configs/${{ env.DEFCONFIG_NAME }}" << 'EOF'
           CONFIG_KSU=y
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
@@ -128,14 +130,16 @@ jobs:
           CONFIG_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
           EOF
-              
-              rm -rf susfs4ksu
-              echo "KernelSU and SuSFS patches applied successfully."
+          
+          rm -rf susfs4ksu
+          echo "KernelSU and SuSFS patches applied successfully."
 
-          elif [ "${{ matrix.variant }}" == "Miku-KSU" ]; then
-              
-              echo "Applying standard KernelSU configurations..."
-              cat >> "arch/arm64/configs/${{ env.DEFCONFIG_NAME }}" << 'EOF'
+      - name: "Apply Standard KernelSU Configuration"
+        working-directory: ${{ env.WORK_DIR }}/common
+        if: ${{ matrix.variant == 'Miku-KSU' }}
+        run: |
+          echo "Applying standard KernelSU configurations..."
+          cat >> "arch/arm64/configs/${{ env.DEFCONFIG_NAME }}" << 'EOF'
           CONFIG_KSU=y
           # CONFIG_KSU_SUSFS is not set
           CONFIG_OVERLAY_FS=y
@@ -145,10 +149,8 @@ jobs:
           CONFIG_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
           EOF
-              
-              echo "Standard KernelSU configuration applied."
-              
-          fi
+          
+          echo "Standard KernelSU configuration applied."
 
       - name: "Compile Kernel"
         working-directory: ${{ env.WORK_DIR }}
@@ -189,8 +191,8 @@ jobs:
 
           cat > AnyKernel3/banner << 'EOF'
           ------------------------------------
-                 Custom Kernel Installer
-                 Powered by AnyKernel3
+                 MIKU KERNEL - DIVA
+                 By RapliVX
           ------------------------------------
           EOF
 
