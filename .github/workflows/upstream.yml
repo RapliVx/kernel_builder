@@ -46,5 +46,5 @@ jobs:
             
             git push origin google
             
-            echo "Mirror sinkronisasi berhasil didorong ke upstream!"
+            echo "Sync mirror successfully pushed to upstream!"
           fi
