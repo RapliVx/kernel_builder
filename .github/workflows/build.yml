@@ -283,11 +283,13 @@ jobs:
         with:
           files: final_zips/*.zip
           tag_name: "Build-${{ github.run_number }}-${{ github.sha }}"
-          name: "Kernel Build: ${{ github.event.inputs.kernelBranch }} (#${{ github.run_number }})"
+          name: "Kernel Build"
           body: |
+            ![Banner]()
+            
             ### 🛠️ Build Information
             - **Build Date:** ${{ env.CURRENT_DATE }}
-            - **Device:** `${{ github.event.inputs.kernelDevice }}`
+            - **Defconfig:** `${{ github.event.inputs.kernelDevice }}_defconfig`
             - **Branch:** `${{ github.event.inputs.kernelBranch }}`
             - **LTO:** `${{ github.event.inputs.ltoType }}`
             - **Tick Rate:** `${{ github.event.inputs.tickRate }}`
@@ -306,11 +308,17 @@ jobs:
           LIST=""
           for f in *.zip; do LIST="${LIST}📦 <code>${f}</code>%0A"; done
           
+          COMMIT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/Build-${{ github.run_number }}-${{ github.sha }}"
-          MSG="<b>✅ Kernel Build Completed</b>%0A%0A"
-          MSG="${MSG}<b>Device:</b> ${{ github.event.inputs.kernelDevice }}%0A"
-          MSG="${MSG}<b>Branch:</b> ${{ github.event.inputs.kernelBranch }}%0A%0A"
-          MSG="${MSG}<b>Generated Packages:</b>%0A${LIST}%0A"
+          
+          MSG="<b>✅ MikuKernel Build Completed!</b>%0A%0A"
+          MSG="${MSG}<b>📱 Defconfig:</b> <code>${{ github.event.inputs.kernelDevice }}_defconfig</code>%0A"
+          MSG="${MSG}<b>🌿 Branch:</b> <code>${{ github.event.inputs.kernelBranch }}</code>%0A"
+          MSG="${MSG}<b>🛠️ Toolchain:</b> <code>${{ github.event.inputs.buildToolchain }}</code>%0A"
+          MSG="${MSG}<b>⚙️ LTO:</b> <code>${{ github.event.inputs.ltoType }}</code> | <b>Tick:</b> <code>${{ github.event.inputs.tickRate }}</code>%0A"
+          MSG="${MSG}<b>🚀 Optimization:</b> <code>${{ github.event.inputs.optimizationLevel }}</code>%0A"
+          MSG="${MSG}<b>📌 Commit:</b> <code>${COMMIT_SHA}</code> (Run #${{ github.run_number }})%0A%0A"
+          MSG="${MSG}<b>📦 Generated Packages:</b>%0A${LIST}%0A"
           MSG="${MSG}🔗 <a href='${RELEASE_URL}'>Download from GitHub Releases</a>"
           
           curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
