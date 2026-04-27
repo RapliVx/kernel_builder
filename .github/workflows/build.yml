@@ -242,6 +242,7 @@ jobs:
           sed -i "/POST_DEFCONFIG_CMDS=/d" common/build.config.gki.aarch64 || true
 
           LTO=${{ github.event.inputs.ltoType }} \
+          UPDATE_SYMBOL_LIST=1 \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
           build/build.sh -j$(nproc --all)
 
