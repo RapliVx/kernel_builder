@@ -285,7 +285,7 @@ jobs:
               cp -r ak3_base "ak3-$variant"
               cp -f "./artifacts/kernel-$variant/Image.$variant" "ak3-$variant/Image"
               
-              # ZIP Name dipasangkan dengan CI_VERSION
+              # ZIP it
               ZIP_NAME="MikuKernel-${CI_VERSION}-${variant^^}-$(date +'%Y%m%d').zip"
               cd "ak3-$variant"
               zip -r9 "../final_zips/$ZIP_NAME" * -x .git/* README.md
