@@ -2,7 +2,6 @@ name: "Kernel Build"
 
 env:
   OUT_DIR: "out"
-  KERNEL_VERSION: "5.15"
   ANDROID_VERSION: "13"
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -81,6 +80,8 @@ jobs:
   build-kernel:
     name: "Build: ${{ matrix.variant }}"
     runs-on: ubuntu-latest
+    outputs:
+      ci_version: ${{ steps.extract_version.outputs.CI_VERSION }}
     strategy:
       fail-fast: false
       matrix:
@@ -218,6 +219,19 @@ jobs:
              echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$CONFIG_FILE"
           fi
 
+      - name: "Extract Kernel Version"
+        id: extract_version
+        working-directory: ${{ env.WORK_DIR }}/common
+        run: |
+          K_VER=$(grep -m 1 '^VERSION =' Makefile | awk '{print $3}')
+          K_PATCH=$(grep -m 1 '^PATCHLEVEL =' Makefile | awk '{print $3}')
+          K_SUB=$(grep -m 1 '^SUBLEVEL =' Makefile | awk '{print $3}')
+          FULL_VER="${K_VER}.${K_PATCH}.${K_SUB}"
+          
+          echo "CI_VERSION=$FULL_VER" >> $GITHUB_OUTPUT
+          echo "CI_VERSION=$FULL_VER" >> $GITHUB_ENV
+          echo "Version Extracted: $FULL_VER"
+
       - name: "Build Kernel"
         working-directory: ${{ env.WORK_DIR }}
         run: |
@@ -243,6 +257,8 @@ jobs:
     needs: build-kernel
     permissions:
       contents: write
+    env:
+      CI_VERSION: ${{ needs.build-kernel.outputs.ci_version }}
     steps:
       - name: "Download Built Kernels"
         uses: actions/download-artifact@v4
@@ -263,15 +279,14 @@ jobs:
           EOF
           mkdir -p final_zips
           
-          # Loop through variants and package them separately
           for variant in vanilla ksu; do
             if [ -d "./artifacts/kernel-$variant" ]; then
               echo "Packaging variant: $variant"
               cp -r ak3_base "ak3-$variant"
               cp -f "./artifacts/kernel-$variant/Image.$variant" "ak3-$variant/Image"
               
-              # ZIP it
-              ZIP_NAME="MikuKernel-${{ env.KERNEL_VERSION }}-${variant^^}-$(date +'%Y%m%d').zip"
+              # ZIP Name dipasangkan dengan CI_VERSION
+              ZIP_NAME="MikuKernel-${CI_VERSION}-${variant^^}-$(date +'%Y%m%d').zip"
               cd "ak3-$variant"
               zip -r9 "../final_zips/$ZIP_NAME" * -x .git/* README.md
               cd ..
@@ -283,12 +298,13 @@ jobs:
         with:
           files: final_zips/*.zip
           tag_name: "Build-${{ github.run_number }}-${{ github.sha }}"
-          name: "Kernel Build"
+          name: "Kernel Build: ${{ env.CI_VERSION }}"
           body: |
-            ![Banner]()
+            ![Banner](https://raw.githubusercontent.com/RapliVx/msm-5.15/main/image/banner.png)
             
             ### 🛠️ Build Information
             - **Build Date:** ${{ env.CURRENT_DATE }}
+            - **Kernel Version:** `${{ env.CI_VERSION }}`
             - **Defconfig:** `${{ github.event.inputs.kernelDevice }}_defconfig`
             - **Branch:** `${{ github.event.inputs.kernelBranch }}`
             - **LTO:** `${{ github.event.inputs.ltoType }}`
@@ -311,7 +327,7 @@ jobs:
           COMMIT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/Build-${{ github.run_number }}-${{ github.sha }}"
           
-          MSG="<b>✅ MikuKernel Build Completed!</b>%0A%0A"
+          MSG="<b>✅ MikuKernel ${CI_VERSION} Build Completed!</b>%0A%0A"
           MSG="${MSG}<b>📱 Defconfig:</b> <code>${{ github.event.inputs.kernelDevice }}_defconfig</code>%0A"
           MSG="${MSG}<b>🌿 Branch:</b> <code>${{ github.event.inputs.kernelBranch }}</code>%0A"
           MSG="${MSG}<b>🛠️ Toolchain:</b> <code>${{ github.event.inputs.buildToolchain }}</code>%0A"
