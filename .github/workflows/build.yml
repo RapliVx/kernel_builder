@@ -146,7 +146,7 @@ jobs:
           echo "Applying KernelSU-Next (dev-susfs)..."
           curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
           echo "Applying All Managers Patch..."
-          curl -LSs "https://raw.githubusercontent.com/rinnsakaguchi/builder/refs/heads/anisphia/kernel-patches/ksu/ksun-add-more-managers-support.patch" | patch -p1 -d KernelSU-Next
+          curl -LSs "https://raw.githubusercontent.com/RapliVx/kernel_builder/refs/heads/main/patch/ksun-add-more-managers-support.patch" | patch -p1 -d KernelSU-Next
           if [ ! -L "drivers/kernelsu" ]; then
              ln -sf ../KernelSU-Next drivers/kernelsu
           fi
