@@ -13,17 +13,17 @@ on:
         description: "Kernel Source Repository URL"
         required: true
         type: string
-        default: "https://github.com/RapliVx/msm-5.15.git"
+        default: "https://github.com/RapliVx/caf_msm-5.15.git"
       kernelBranch:
         description: "Kernel Branch"
         required: true
         type: string
-        default: "MikuKernel"
+        default: "Miku"
       kernelDevice:
         description: "Target Device (for defconfig name)"
         required: true
         type: string
-        default: "miku"
+        default: "gki"
       localVersion:
         description: "Custom localversion (e.g., -Miku-Edition)"
         required: false
