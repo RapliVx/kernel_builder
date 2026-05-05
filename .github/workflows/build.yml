@@ -174,9 +174,15 @@ jobs:
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          if [ -n "${{ github.event.inputs.localVersion }}" ]; then
-            echo "CONFIG_LOCALVERSION=\"${{ github.event.inputs.localVersion }}\"" >> "$CONFIG_FILE"
+          LOCAL_VERSION="${{ github.event.inputs.localVersion }}"
+          if [ -n "$LOCAL_VERSION" ]; then
+            if grep -q "^CONFIG_LOCALVERSION=" "$CONFIG_FILE"; then
+              sed -i "s/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"$LOCAL_VERSION\"/" "$CONFIG_FILE"
+            else
+              echo "CONFIG_LOCALVERSION=\"$LOCAL_VERSION\"" >> "$CONFIG_FILE"
+            fi
           fi
+
           sed -i '/CONFIG_LTO_CLANG/d' "$CONFIG_FILE"
           echo "CONFIG_LTO_CLANG=y" >> "$CONFIG_FILE"
           if [ "${{ github.event.inputs.ltoType }}" == "thin" ]; then
