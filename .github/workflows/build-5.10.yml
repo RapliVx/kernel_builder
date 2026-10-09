@@ -109,8 +109,6 @@ jobs:
           repo sync --optimized-fetch --prune --force-sync -j$(nproc --all)
           rm -rf common
           rm -rf .repo
-          echo "Removing default AOSP Clang to save storage..."
-          rm -rf prebuilts-master/clang prebuilts/clang prebuilts/gcc
           aria2c -x 16 -s 16 -o clang.tar.gz "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
           mkdir -p prebuilts-master/clang/host/linux-x86/clang-r547379
           tar -xzf clang.tar.gz -C prebuilts-master/clang/host/linux-x86/clang-r547379
