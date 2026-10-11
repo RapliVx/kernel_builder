@@ -196,7 +196,7 @@ jobs:
              echo "CONFIG_KSU_HOSTSREDIRECT=y" >> "$CONFIG_FILE"
              echo "CONFIG_KSU_ENABLE_FULL_UID_CHECKS=y" >> "$CONFIG_FILE"
              echo "CONFIG_KSU_THRONE_TRACKER_ALWAYS_THREADED=y" >> "$CONFIG_FILE"
-             echo "# CONFIG_KSU_NOPRINTK=y" >> "$CONFIG_FILE"
+             echo "CONFIG_KSU_NOPRINTK=y" >> "$CONFIG_FILE"
              echo "# CONFIG_KSU_SHELL_HAS_SU_ALWAYS is not set" >> "$CONFIG_FILE"
              echo "# CONFIG_KSU_DEBUG is not set" >> "$CONFIG_FILE"
           fi
