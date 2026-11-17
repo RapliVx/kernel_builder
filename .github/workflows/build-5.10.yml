@@ -88,6 +88,11 @@ jobs:
     timeout-minutes: 90
     outputs:
       ci_version: ${{ steps.extract_version.outputs.CI_VERSION }}
+      kernel_sha: ${{ steps.extract_version.outputs.KERNEL_SHA }}
+      kernel_subject: ${{ steps.extract_version.outputs.KERNEL_SUBJECT }}
+      clang_version: ${{ steps.extract_version.outputs.CLANG_VERSION }}
+      kernel_release: ${{ steps.prepare_artifact.outputs.KERNEL_RELEASE }}
+      build_start: ${{ steps.setup_env.outputs.BUILD_START }}
     strategy:
       fail-fast: false
       matrix:
@@ -110,8 +115,10 @@ jobs:
 
     steps:
       - name: "Setup Build Environment"
+        id: setup_env
         run: |
           set -euo pipefail
+          echo "BUILD_START=$(date +%s)" >> "$GITHUB_OUTPUT"
           sudo apt-get update -qq
           COMMON_PKGS=(aria2 bc bison build-essential cpio curl dwarves flex git libelf-dev libssl-dev python3 rsync zip)
           if [ "$BUILD_TOOLCHAIN" = "android-tools" ]; then
@@ -307,9 +314,25 @@ jobs:
             echo "Failed to extract kernel version from Makefile." >&2
             exit 1
           fi
-          echo "CI_VERSION=$FULL_VER" >> "$GITHUB_OUTPUT"
+          K_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+          K_SUBJ=$(git log -1 --pretty=%s 2>/dev/null | python3 -c 'import re, sys; s = re.sub(r"\s+", " ", sys.stdin.read()).strip(); print((s[:77] + "...") if len(s) > 80 else s)')
+          if [ "$BUILD_TOOLCHAIN" = "android-tools" ]; then
+            CLANG_BIN="../prebuilts-master/clang/host/linux-x86/clang-r547379/bin/clang"
+          else
+            CLANG_BIN="$(command -v clang || true)"
+          fi
+          CLANG_VER=""
+          if [ -n "${CLANG_BIN:-}" ] && [ -x "$CLANG_BIN" ]; then
+            CLANG_VER=$("$CLANG_BIN" --version 2>/dev/null | python3 -c 'import re, sys; lines = sys.stdin.read().splitlines(); line = lines[0] if lines else ""; print(re.sub(r"\s*\(https?://[^)]+\)", "", line).strip())')
+          fi
+          {
+            echo "CI_VERSION=$FULL_VER"
+            echo "KERNEL_SHA=$K_SHA"
+            echo "KERNEL_SUBJECT=$K_SUBJ"
+            echo "CLANG_VERSION=${CLANG_VER:-unknown}"
+          } >> "$GITHUB_OUTPUT"
           echo "CI_VERSION=$FULL_VER" >> "$GITHUB_ENV"
-          echo "Version Extracted: $FULL_VER"
+          echo "Version Extracted: $FULL_VER (${K_SHA})"
 
       - name: "Build Kernel (AOSP)"
         if: github.event.inputs.buildToolchain == 'android-tools'
@@ -362,6 +385,7 @@ jobs:
           cp -f "${OUT_ABS}/arch/arm64/boot/Image" "${OUT_ABS}/dist/Image"
 
       - name: "Prepare Artifact"
+        id: prepare_artifact
         run: |
           set -euo pipefail
           mkdir -p output
@@ -371,6 +395,16 @@ jobs:
             exit 1
           fi
           cp -f "$IMAGE_PATH" "output/Image.${VARIANT}"
+          K_RELEASE=""
+          for rel_file in \
+            "${WORK_DIR}/${OUT_DIR}/common/include/config/kernel.release" \
+            "${WORK_DIR}/${OUT_DIR}/include/config/kernel.release"; do
+            if [ -f "$rel_file" ]; then
+              K_RELEASE=$(tr -d '\r\n' < "$rel_file")
+              break
+            fi
+          done
+          echo "KERNEL_RELEASE=${K_RELEASE}" >> "$GITHUB_OUTPUT"
 
       - name: "Upload Build Artifact"
         uses: actions/upload-artifact@v4
@@ -388,13 +422,22 @@ jobs:
       contents: write
     env:
       CI_VERSION: ${{ needs.build-kernel.outputs.ci_version }}
+      KERNEL_SHA: ${{ needs.build-kernel.outputs.kernel_sha }}
+      KERNEL_SUBJECT: ${{ needs.build-kernel.outputs.kernel_subject }}
+      CLANG_VERSION: ${{ needs.build-kernel.outputs.clang_version }}
+      KERNEL_RELEASE: ${{ needs.build-kernel.outputs.kernel_release }}
+      BUILD_START: ${{ needs.build-kernel.outputs.build_start }}
+      KERNEL_URL: ${{ github.event.inputs.kernelSourceURL }}
       KERNEL_DEVICE: ${{ github.event.inputs.kernelDevice }}
       KERNEL_BRANCH: ${{ github.event.inputs.kernelBranch }}
+      BUILD_KSU: ${{ github.event.inputs.buildKSU }}
+      KSU_LOGGING: ${{ github.event.inputs.ksuLogging }}
       BUILD_TOOLCHAIN: ${{ github.event.inputs.buildToolchain }}
       LTO_TYPE: ${{ github.event.inputs.ltoType }}
       OPT_LEVEL: ${{ github.event.inputs.optimizationLevel }}
       TICK_RATE: ${{ github.event.inputs.tickRate }}
       LOCAL_VERSION: ${{ github.event.inputs.localVersion }}
+      TRIGGER_ACTOR: ${{ github.actor }}
     steps:
       - name: "Download Built Kernels"
         uses: actions/download-artifact@v4
@@ -471,34 +514,124 @@ jobs:
             exit 0
           fi
 
-          shopt -s nullglob
-          LIST=""
-          for f in final_zips/*.zip; do
-            NAME=$(python3 -c 'import html, os, sys; print(html.escape(os.path.basename(sys.argv[1])))' "$f")
-            LIST="${LIST}📦 <code>${NAME}</code>"$'\n'
-          done
+          MSG=$(python3 - <<'PY'
+          import glob
+          import hashlib
+          import html
+          import os
+          import re
+          import time
 
-          ESC_DEVICE=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$KERNEL_DEVICE")
-          ESC_BRANCH=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$KERNEL_BRANCH")
-          ESC_TOOLCHAIN=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$BUILD_TOOLCHAIN")
-          ESC_LTO=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$LTO_TYPE")
-          ESC_OPT=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$OPT_LEVEL")
-          ESC_TICK=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$TICK_RATE")
-          ESC_LOCAL=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$LOCAL_VERSION")
-          COMMIT_SHA="${GITHUB_SHA:0:7}"
-          RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/Build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA}"
+          def esc(val: str) -> str:
+              return html.escape(val, quote=True)
 
-          MSG="<b>✅ GKI-5.10.x ${CI_VERSION}</b>"$'\n\n'
-          MSG+="<b>Device:</b> <code>${ESC_DEVICE}_defconfig</code>"$'\n'
-          MSG+="<b>Branch:</b> <code>${ESC_BRANCH}</code>"$'\n'
-          if [ -n "$ESC_LOCAL" ]; then
-            MSG+="<b>Localversion:</b> <code>${ESC_LOCAL}</code>"$'\n'
-          fi
-          MSG+="<b>Toolchain:</b> <code>${ESC_TOOLCHAIN}</code>"$'\n'
-          MSG+="<b>Compiler:</b> LTO: <code>${ESC_LTO}</code> | Opt: <code>${ESC_OPT}</code> | Tick: <code>${ESC_TICK}</code>"$'\n'
-          MSG+="<b>Commit:</b> <code>${COMMIT_SHA}</code> (Run #${GITHUB_RUN_NUMBER})"$'\n\n'
-          MSG+="<b>Packages:</b>"$'\n'"${LIST}"$'\n'
-          MSG+="<a href='${RELEASE_URL}'>Download Release</a>"
+          def format_source(url: str) -> str:
+              clean = url.strip().rstrip("/")
+              label = re.sub(r"\.git$", "", clean)
+              m = re.match(r"^https?://github\.com/([^/]+/[^/]+)$", label)
+              if m:
+                  label = m.group(1)
+              if clean.startswith(("http://", "https://")):
+                  return f'<a href="{esc(clean)}">{esc(label)}</a>'
+              return f"<code>{esc(label)}</code>"
+
+          ci_ver = os.environ.get("CI_VERSION", "")
+          k_release = os.environ.get("KERNEL_RELEASE", "").strip()
+          k_url = os.environ.get("KERNEL_URL", "")
+          k_branch = os.environ.get("KERNEL_BRANCH", "")
+          k_sha = os.environ.get("KERNEL_SHA", "unknown")
+          k_subj = os.environ.get("KERNEL_SUBJECT", "").strip()
+          k_device = os.environ.get("KERNEL_DEVICE", "")
+          local_ver = os.environ.get("LOCAL_VERSION", "").strip()
+          build_ksu = os.environ.get("BUILD_KSU", "")
+          ksu_log = os.environ.get("KSU_LOGGING", "true")
+          toolchain = os.environ.get("BUILD_TOOLCHAIN", "")
+          clang_ver = os.environ.get("CLANG_VERSION", "").strip()
+          lto = os.environ.get("LTO_TYPE", "")
+          opt = os.environ.get("OPT_LEVEL", "")
+          tick = os.environ.get("TICK_RATE", "")
+          actor = os.environ.get("TRIGGER_ACTOR", "")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          run_num = os.environ.get("GITHUB_RUN_NUMBER", "")
+          run_id = os.environ.get("GITHUB_RUN_ID", "")
+          gh_sha = os.environ.get("GITHUB_SHA", "")
+
+          dur_text = ""
+          start_raw = os.environ.get("BUILD_START", "").strip()
+          if start_raw.isdigit():
+              elapsed = max(0, int(time.time()) - int(start_raw))
+              mins, secs = divmod(elapsed, 60)
+              hrs, mins = divmod(mins, 60)
+              dur_text = f"{hrs}h {mins}m {secs}s" if hrs else f"{mins}m {secs}s"
+
+          if build_ksu == "vanilla":
+              variant_line = "<code>vanilla</code>"
+          else:
+              log_state = "on" if ksu_log == "true" else "off"
+              variant_line = f"<code>{esc(build_ksu)}</code> (xxksu, dmesg log: <code>{log_state}</code>)"
+
+          toolchain_line = f"<code>{esc(toolchain)}</code>"
+          if clang_ver and clang_ver != "unknown":
+              toolchain_line += f" (<code>{esc(clang_ver)}</code>)"
+
+          zips = sorted(glob.glob("final_zips/*.zip"))
+          pkg_lines = []
+          for path in zips:
+              size_mib = os.path.getsize(path) / (1024 * 1024)
+              h = hashlib.sha256()
+              with open(path, "rb") as fp:
+                  while True:
+                      chunk = fp.read(1 << 20)
+                      if not chunk:
+                          break
+                      h.update(chunk)
+              pkg_lines.append(
+                  f"📦 <code>{esc(os.path.basename(path))}</code> ({size_mib:.2f} MiB)\n"
+                  f"<code>sha256: {h.hexdigest()}</code>"
+              )
+
+          release_url = f"https://github.com/{repo}/releases/tag/Build-{run_num}-{gh_sha}"
+          run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+          lines = [
+              f"<b>✅ GKI-5.10 Build Succeeded ({esc(ci_ver)})</b>",
+              "",
+              "<b>Kernel Info</b>",
+          ]
+          if k_release:
+              lines.append(f"• Release: <code>{esc(k_release)}</code>")
+          elif local_ver:
+              lines.append(f"• Localversion: <code>{esc(local_ver)}</code>")
+          lines.extend([
+              f"• Device: <code>{esc(k_device)}_defconfig</code>",
+              f"• Variants: {variant_line}",
+              f"• Source: {format_source(k_url)} @ <code>{esc(k_branch)}</code> (<code>{esc(k_sha)}</code>)",
+          ])
+          if k_subj:
+              lines.append(f"• Last Commit: <i>{esc(k_subj)}</i>")
+          lines.extend([
+              "",
+              "<b>Toolchain &amp; Compiler</b>",
+              f"• Toolchain: {toolchain_line}",
+              f"• Flags: LTO <code>{esc(lto)}</code> | Opt <code>{esc(opt)}</code> | Tick <code>{esc(tick)}</code>",
+              "",
+              "<b>Run Details</b>",
+          ])
+          run_meta = f"• Triggered by: <code>{esc(actor)}</code> | Run #{esc(run_num)}"
+          if dur_text:
+              run_meta += f" | {dur_text}"
+          lines.extend([
+              run_meta,
+              f"• Builder Commit: <code>{esc(gh_sha[:7])}</code>",
+              "",
+              f"<b>Packages ({len(zips)})</b>",
+              *pkg_lines,
+              "",
+              f'<a href="{esc(release_url)}">Download Release</a> • <a href="{esc(run_url)}">Workflow Logs</a>',
+          ])
+          print("\n".join(lines))
+          PY
+          )
 
           curl -sfS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
@@ -512,13 +645,23 @@ jobs:
     timeout-minutes: 5
     needs: [build-kernel, package-release]
     if: ${{ always() && (needs.build-kernel.result == 'failure' || needs.package-release.result == 'failure') }}
+    permissions:
+      actions: read
     env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RESULT: ${{ needs.build-kernel.result }}
+      PACKAGE_RESULT: ${{ needs.package-release.result }}
+      KERNEL_URL: ${{ github.event.inputs.kernelSourceURL }}
       KERNEL_DEVICE: ${{ github.event.inputs.kernelDevice }}
       KERNEL_BRANCH: ${{ github.event.inputs.kernelBranch }}
+      BUILD_KSU: ${{ github.event.inputs.buildKSU }}
+      KSU_LOGGING: ${{ github.event.inputs.ksuLogging }}
+      LOCAL_VERSION: ${{ github.event.inputs.localVersion }}
       BUILD_TOOLCHAIN: ${{ github.event.inputs.buildToolchain }}
       LTO_TYPE: ${{ github.event.inputs.ltoType }}
       OPT_LEVEL: ${{ github.event.inputs.optimizationLevel }}
       TICK_RATE: ${{ github.event.inputs.tickRate }}
+      TRIGGER_ACTOR: ${{ github.actor }}
     steps:
       - name: "Send Telegram Failure Alert"
         run: |
@@ -528,21 +671,103 @@ jobs:
             exit 0
           fi
 
-          ESC_DEVICE=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$KERNEL_DEVICE")
-          ESC_BRANCH=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$KERNEL_BRANCH")
-          ESC_TOOLCHAIN=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$BUILD_TOOLCHAIN")
-          ESC_LTO=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$LTO_TYPE")
-          ESC_OPT=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$OPT_LEVEL")
-          ESC_TICK=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$TICK_RATE")
-          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          JOBS_JSON=$(curl -sfS --max-time 10 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=50" 2>/dev/null || true)
+          export JOBS_JSON
 
-          MSG="<b>❌ GKI-5.10.x Build Failed</b>"$'\n\n'
-          MSG+="<b>Device:</b> <code>${ESC_DEVICE}_defconfig</code>"$'\n'
-          MSG+="<b>Branch:</b> <code>${ESC_BRANCH}</code>"$'\n'
-          MSG+="<b>Toolchain:</b> <code>${ESC_TOOLCHAIN}</code>"$'\n'
-          MSG+="<b>Compiler:</b> LTO: <code>${ESC_LTO}</code> | Opt: <code>${ESC_OPT}</code> | Tick: <code>${ESC_TICK}</code>"$'\n'
-          MSG+="<b>Run:</b> #${GITHUB_RUN_NUMBER}"$'\n\n'
-          MSG+="<a href='${RUN_URL}'>View Workflow Logs</a>"
+          MSG=$(python3 - <<'PY'
+          import html
+          import json
+          import os
+          import re
+
+          def esc(val: str) -> str:
+              return html.escape(val, quote=True)
+
+          def format_source(url: str) -> str:
+              clean = url.strip().rstrip("/")
+              label = re.sub(r"\.git$", "", clean)
+              m = re.match(r"^https?://github\.com/([^/]+/[^/]+)$", label)
+              if m:
+                  label = m.group(1)
+              if clean.startswith(("http://", "https://")):
+                  return f'<a href="{esc(clean)}">{esc(label)}</a>'
+              return f"<code>{esc(label)}</code>"
+
+          k_url = os.environ.get("KERNEL_URL", "")
+          k_branch = os.environ.get("KERNEL_BRANCH", "")
+          k_device = os.environ.get("KERNEL_DEVICE", "")
+          local_ver = os.environ.get("LOCAL_VERSION", "").strip()
+          build_ksu = os.environ.get("BUILD_KSU", "")
+          ksu_log = os.environ.get("KSU_LOGGING", "true")
+          toolchain = os.environ.get("BUILD_TOOLCHAIN", "")
+          lto = os.environ.get("LTO_TYPE", "")
+          opt = os.environ.get("OPT_LEVEL", "")
+          tick = os.environ.get("TICK_RATE", "")
+          actor = os.environ.get("TRIGGER_ACTOR", "")
+          build_res = os.environ.get("BUILD_RESULT", "")
+          pkg_res = os.environ.get("PACKAGE_RESULT", "")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          run_num = os.environ.get("GITHUB_RUN_NUMBER", "")
+          run_id = os.environ.get("GITHUB_RUN_ID", "")
+
+          if build_ksu == "vanilla":
+              variant_line = "<code>vanilla</code>"
+          else:
+              log_state = "on" if ksu_log == "true" else "off"
+              variant_line = f"<code>{esc(build_ksu)}</code> (xxksu, dmesg log: <code>{log_state}</code>)"
+
+          failed_steps = []
+          raw_jobs = os.environ.get("JOBS_JSON", "").strip()
+          if raw_jobs:
+              try:
+                  jobs = json.loads(raw_jobs).get("jobs", [])
+                  for job in jobs:
+                      if job.get("conclusion") == "failure":
+                          jname = job.get("name", "unknown")
+                          bad_steps = [
+                              s.get("name", "unknown")
+                              for s in job.get("steps", [])
+                              if s.get("conclusion") == "failure"
+                          ]
+                          if bad_steps:
+                              for sname in bad_steps:
+                                  failed_steps.append(f"  - <code>{esc(jname)}</code> -> <code>{esc(sname)}</code>")
+                          else:
+                              failed_steps.append(f"  - <code>{esc(jname)}</code>")
+              except Exception:
+                  pass
+
+          run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+          lines = [
+              "<b>❌ GKI-5.10 Build Failed</b>",
+              "",
+              "<b>Build Config</b>",
+              f"• Device: <code>{esc(k_device)}_defconfig</code>",
+              f"• Variants: {variant_line}",
+              f"• Source: {format_source(k_url)} @ <code>{esc(k_branch)}</code>",
+          ]
+          if local_ver:
+              lines.append(f"• Localversion: <code>{esc(local_ver)}</code>")
+          lines.extend([
+              f"• Toolchain: <code>{esc(toolchain)}</code> | LTO <code>{esc(lto)}</code> | Opt <code>{esc(opt)}</code> | Tick <code>{esc(tick)}</code>",
+              "",
+              "<b>Failure Details</b>",
+              f"• Triggered by: <code>{esc(actor)}</code> | Run #{esc(run_num)}",
+              f"• Jobs: build <code>{esc(build_res)}</code> | release <code>{esc(pkg_res)}</code>",
+          ])
+          if failed_steps:
+              lines.append("• Failed step(s):")
+              lines.extend(failed_steps)
+          lines.extend([
+              "",
+              f'<a href="{esc(run_url)}">View Workflow Logs</a>',
+          ])
+          print("\n".join(lines))
+          PY
+          )
 
           curl -sfS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
