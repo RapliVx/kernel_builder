@@ -2,7 +2,6 @@ name: "Kernel Build (5.10)"
 
 env:
   OUT_DIR: "out"
-  ANDROID_VERSION: "13"
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -18,7 +17,7 @@ on:
         description: "Kernel Branch"
         required: true
         type: string
-        default: "aetherium"
+        default: "ZeroTwo-Oplus"
       kernelDevice:
         description: "Target Device (for defconfig name)"
         required: true
@@ -38,6 +37,11 @@ on:
           - "vanilla"
           - "ksu"
           - "all"
+      ksuLogging:
+        description: "Enable KernelSU dmesg logging"
+        required: false
+        type: boolean
+        default: true
       tickRate:
         description: "Kernel Tick Rate (Hz)"
         required: false
@@ -75,11 +79,13 @@ on:
         options:
           - "thin"
           - "full"
+          - "none"
 
 jobs:
   build-kernel:
     name: "Build: ${{ matrix.variant }}"
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     outputs:
       ci_version: ${{ steps.extract_version.outputs.CI_VERSION }}
     strategy:
@@ -91,48 +97,101 @@ jobs:
           '["ksu"]' ) }}
     env:
       WORK_DIR: workspace
+      VARIANT: ${{ matrix.variant }}
       DEFCONFIG_NAME: ${{ github.event.inputs.kernelDevice }}_defconfig
+      KERNEL_URL: ${{ github.event.inputs.kernelSourceURL }}
+      KERNEL_BRANCH: ${{ github.event.inputs.kernelBranch }}
+      LOCAL_VERSION: ${{ github.event.inputs.localVersion }}
+      KSU_LOGGING: ${{ github.event.inputs.ksuLogging }}
+      TICK_RATE: ${{ github.event.inputs.tickRate }}
+      OPT_LEVEL: ${{ github.event.inputs.optimizationLevel }}
+      BUILD_TOOLCHAIN: ${{ github.event.inputs.buildToolchain }}
+      LTO_TYPE: ${{ github.event.inputs.ltoType }}
 
     steps:
       - name: "Setup Build Environment"
         run: |
+          set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y repo rsync aria2 build-essential bc curl flex cpio git zip dwarves libelf-dev gcc-aarch64-linux-gnu libssl-dev python3 clang lld llvm llvm-dev
-          mkdir -p ${{ env.WORK_DIR }}
-          echo "BUILD_TIME=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+          COMMON_PKGS=(aria2 bc bison build-essential cpio curl dwarves flex git libelf-dev libssl-dev python3 rsync zip)
+          if [ "$BUILD_TOOLCHAIN" = "android-tools" ]; then
+            COMMON_PKGS+=(repo)
+          else
+            COMMON_PKGS+=(binutils-aarch64-linux-gnu device-tree-compiler kmod xz-utils zstd)
+          fi
+          sudo apt-get install -y --no-install-recommends "${COMMON_PKGS[@]}"
+          mkdir -p "$WORK_DIR"
+
+      # Clone kernel before syncing toolchains so bad URL, branch, or defconfig fails fast.
+      - name: "Clone Custom Kernel Source"
+        working-directory: ${{ env.WORK_DIR }}
+        run: |
+          set -euo pipefail
+          rm -rf common
+          git clone --depth=1 --branch "$KERNEL_BRANCH" "$KERNEL_URL" common
+          if [ ! -f "common/arch/arm64/configs/${DEFCONFIG_NAME}" ]; then
+            echo "Defconfig not found: common/arch/arm64/configs/${DEFCONFIG_NAME}" >&2
+            exit 1
+          fi
 
       - name: "Sync AOSP Tools & Clang r547379"
         if: github.event.inputs.buildToolchain == 'android-tools'
         working-directory: ${{ env.WORK_DIR }}
         run: |
+          set -euo pipefail
+          if [ ! -f "common/build.config.gki.aarch64" ]; then
+            echo "common/build.config.gki.aarch64 not found; use custom-tools for non-AOSP builds." >&2
+            exit 1
+          fi
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10-lts --depth=1
-          repo sync --optimized-fetch --prune --force-sync -j$(nproc --all)
-          rm -rf common
+          # Sync only build scripts and host prebuilts; skip AOSP common kernel and default clang.
+          repo sync -c --no-tags --no-clone-bundle -j"$(nproc --all)" \
+            build \
+            prebuilts/gas/linux-x86 \
+            prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8 \
+            prebuilts/build-tools \
+            prebuilts/kernel-build-tools
           rm -rf .repo
           aria2c -x 16 -s 16 -o clang.tar.gz "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
           mkdir -p prebuilts-master/clang/host/linux-x86/clang-r547379
           tar -xzf clang.tar.gz -C prebuilts-master/clang/host/linux-x86/clang-r547379
           rm -f clang.tar.gz
+          if [ ! -x "prebuilts-master/clang/host/linux-x86/clang-r547379/bin/clang" ]; then
+            echo "Executable clang binary not found in clang-r547379." >&2
+            exit 1
+          fi
 
-      - name: "Clone Custom Kernel Source"
-        working-directory: ${{ env.WORK_DIR }}
-        run: |
-          git clone --depth=1 --branch ${{ github.event.inputs.kernelBranch }} \
-            ${{ github.event.inputs.kernelSourceURL }} common
-
-      - name: "Retrieve Custom Toolchain (If selected)"
+      - name: "Retrieve Custom Toolchain"
         if: github.event.inputs.buildToolchain == 'custom-tools'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          CLANG_URL=$(curl -sL "https://api.github.com/repos/greenforce-project/greenforce_clang/releases/latest" | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+          set -euo pipefail
+          CLANG_URL=$(curl -sfL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/greenforce-project/greenforce_clang/releases/latest" \
+            | python3 -c 'import json, sys; assets = json.load(sys.stdin).get("assets", []); print(next((a["browser_download_url"] for a in assets if a["name"].endswith((".tar.gz", ".tar.xz", ".tar.zst", ".tar.bz2"))), ""))')
+          if [ -z "$CLANG_URL" ]; then
+            echo "Failed to resolve greenforce_clang release asset URL." >&2
+            exit 1
+          fi
           mkdir -p clang
-          wget -qO "clang/clang.tar.gz" "$CLANG_URL"
-          tar -xf clang/clang.tar.gz -C clang
-          CLANG_BIN=$(find $(pwd)/clang -type d -name "bin" | head -n 1)
-          echo "CLANG_PATH=$CLANG_BIN" >> $GITHUB_ENV
-          echo "$CLANG_BIN" >> $GITHUB_PATH
+          ARCHIVE_NAME=$(basename "$CLANG_URL")
+          aria2c -x 16 -s 16 -o "$ARCHIVE_NAME" -d clang "$CLANG_URL"
+          tar -xf "clang/$ARCHIVE_NAME" -C clang
+          rm -f "clang/$ARCHIVE_NAME"
+          CLANG_BIN=$(find "$(pwd)/clang" -path "*/bin/clang" -xtype f -executable -printf '%h\n' -quit)
+          if [ -z "$CLANG_BIN" ] || [ ! -x "$CLANG_BIN/clang" ]; then
+            echo "Executable clang binary not found in extracted toolchain." >&2
+            exit 1
+          fi
+          echo "CLANG_PATH=$CLANG_BIN" >> "$GITHUB_ENV"
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
 
       - name: "Setup Swap 20GB"
-        uses: pierotofy/set-swap-space@master
+        # Pinned to master commit with ext4/btrfs fallocate handling (2025-05-08).
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761
         with:
           swap-size-gb: 20
 
@@ -140,91 +199,178 @@ jobs:
         if: matrix.variant == 'ksu'
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
-          set -e
+          set -euo pipefail
           rm -rf ./KernelSU ./KernelSU-Next ./drivers/kernelsu
-          echo "Applying KernelSU (xxksu)..."
-          curl -LSs "https://raw.githubusercontent.com/RapliVx/KernelSU/xxksu/kernel/setup.sh" | bash -s xxksu
-          if [ ! -L "drivers/kernelsu" ]; then
-             ln -sf ../KernelSU drivers/kernelsu
+          curl -sfSL "https://raw.githubusercontent.com/RapliVx/KernelSU/xxksu/kernel/setup.sh" | bash -s xxksu
+          if [ ! -e "drivers/kernelsu/Kconfig" ]; then
+            ln -sfn ../KernelSU/kernel drivers/kernelsu
           fi
 
       - name: "Configure Kernel Features"
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
-          CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
-          LOCAL_VERSION="${{ github.event.inputs.localVersion }}"
+          set -euo pipefail
+          CONFIG_FILE="arch/arm64/configs/${DEFCONFIG_NAME}"
+
+          # Write LOCALVERSION via Python so '/', '&', and quotes never break sed.
           if [ -n "$LOCAL_VERSION" ]; then
-            if grep -q "^CONFIG_LOCALVERSION=" "$CONFIG_FILE"; then
-              sed -i "s/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"$LOCAL_VERSION\"/" "$CONFIG_FILE"
-            else
-              echo "CONFIG_LOCALVERSION=\"$LOCAL_VERSION\"" >> "$CONFIG_FILE"
-            fi
+            python3 - "$CONFIG_FILE" "$LOCAL_VERSION" << 'PY'
+          import sys
+          path, value = sys.argv[1], sys.argv[2]
+          escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+          with open(path, "r", encoding="utf-8") as f:
+              lines = [l for l in f if not l.startswith("CONFIG_LOCALVERSION=") and l.strip() != "# CONFIG_LOCALVERSION is not set"]
+          lines.append(f'CONFIG_LOCALVERSION="{escaped}"\n')
+          with open(path, "w", encoding="utf-8") as f:
+              f.writelines(lines)
+          PY
           fi
 
-          sed -i '/CONFIG_LTO_CLANG/d' "$CONFIG_FILE"
-          echo "CONFIG_LTO_CLANG=y" >> "$CONFIG_FILE"
-          if [ "${{ github.event.inputs.ltoType }}" == "thin" ]; then
-            echo "CONFIG_LTO_CLANG_THIN=y" >> "$CONFIG_FILE"
-          else
-            echo "CONFIG_LTO_CLANG_FULL=y" >> "$CONFIG_FILE"
-          fi
-          sed -i '/CONFIG_CC_OPTIMIZE_FOR/d' "$CONFIG_FILE"
-          case "${{ github.event.inputs.optimizationLevel }}" in
-            O2) echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$CONFIG_FILE" ;;
-            O3) echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y" >> "$CONFIG_FILE" ;;
-            Os) echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> "$CONFIG_FILE" ;;
+          case "$LTO_TYPE" in
+            none)
+              ./scripts/config --file "$CONFIG_FILE" \
+                -d LTO_CLANG -e LTO_NONE -d LTO_CLANG_THIN -d LTO_CLANG_FULL -d THINLTO
+              ;;
+            thin)
+              ./scripts/config --file "$CONFIG_FILE" \
+                -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
+              ;;
+            full)
+              ./scripts/config --file "$CONFIG_FILE" \
+                -e LTO_CLANG -d LTO_NONE -d LTO_CLANG_THIN -e LTO_CLANG_FULL -d THINLTO
+              ;;
           esac
-          if [ "${{ github.event.inputs.tickRate }}" != "default" ]; then
-            HZ_VAL=$(echo "${{ github.event.inputs.tickRate }}" | sed 's/Hz//')
-            sed -i '/CONFIG_HZ/d' "$CONFIG_FILE"
-            echo "CONFIG_NO_HZ_IDLE=y" >> "$CONFIG_FILE"
-            echo "CONFIG_HZ=$HZ_VAL" >> "$CONFIG_FILE"
-            echo "CONFIG_HZ_$HZ_VAL=y" >> "$CONFIG_FILE"
+
+          if [ "$OPT_LEVEL" != "default" ]; then
+            case "$OPT_LEVEL" in
+              O2)
+                ./scripts/config --file "$CONFIG_FILE" \
+                  -e CC_OPTIMIZE_FOR_PERFORMANCE -d CC_OPTIMIZE_FOR_PERFORMANCE_O3 -d CC_OPTIMIZE_FOR_SIZE
+                ;;
+              O3)
+                # CC_OPTIMIZE_FOR_PERFORMANCE_O3 depends on ARC; keep O2 here and pass -O3 via KCFLAGS.
+                ./scripts/config --file "$CONFIG_FILE" \
+                  -e CC_OPTIMIZE_FOR_PERFORMANCE -d CC_OPTIMIZE_FOR_PERFORMANCE_O3 -d CC_OPTIMIZE_FOR_SIZE
+                ;;
+              Os)
+                ./scripts/config --file "$CONFIG_FILE" \
+                  -d CC_OPTIMIZE_FOR_PERFORMANCE -d CC_OPTIMIZE_FOR_PERFORMANCE_O3 -e CC_OPTIMIZE_FOR_SIZE
+                ;;
+            esac
           fi
+
+          if [ "$TICK_RATE" != "default" ]; then
+            HZ_VAL="${TICK_RATE%Hz}"
+            ./scripts/config --file "$CONFIG_FILE" \
+              -e NO_HZ_IDLE -d HZ_PERIODIC -d NO_HZ_FULL \
+              -d HZ_100 -d HZ_250 -d HZ_300 -d HZ_1000 \
+              -e "HZ_${HZ_VAL}" --set-val HZ "$HZ_VAL"
+          fi
+
           sed -i '/CONFIG_KSU/d' "$CONFIG_FILE"
-          
-          if [ "${{ matrix.variant }}" == "ksu" ]; then
-             echo "Enabling KSU with xxksu configuration..."
-             echo "# KernelSU Configuration" >> "$CONFIG_FILE"
-             echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-             echo "CONFIG_KSU_LSM_SECURITY_HOOKS=y" >> "$CONFIG_FILE"
-             echo "CONFIG_KSU_FEATURE_SULOG=y" >> "$CONFIG_FILE"
-             echo "CONFIG_KSU_FEATURE_ADBROOT=y" >> "$CONFIG_FILE"
-             echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> "$CONFIG_FILE"
-             echo "# CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set" >> "$CONFIG_FILE"
-             echo "# CONFIG_KSU_KPROBES_KSUD is not set" >> "$CONFIG_FILE"
-             echo "CONFIG_KSU_HOSTSREDIRECT=y" >> "$CONFIG_FILE"
-             echo "CONFIG_KSU_ENABLE_FULL_UID_CHECKS=y" >> "$CONFIG_FILE"
-             echo "CONFIG_KSU_THRONE_TRACKER_ALWAYS_THREADED=y" >> "$CONFIG_FILE"
-             echo "# CONFIG_KSU_NOPRINTK=y" >> "$CONFIG_FILE"
-             echo "# CONFIG_KSU_SHELL_HAS_SU_ALWAYS is not set" >> "$CONFIG_FILE"
-             echo "# CONFIG_KSU_DEBUG is not set" >> "$CONFIG_FILE"
+          if [ "$VARIANT" = "ksu" ]; then
+            ./scripts/config --file "$CONFIG_FILE" \
+              -e KSU \
+              -e KSU_LSM_SECURITY_HOOKS \
+              -e KSU_FEATURE_SULOG \
+              -e KSU_FEATURE_ADBROOT \
+              -e KSU_HACK_ARM64_BRANCH_LINK \
+              -d KSU_TAMPER_SYSCALL_TABLE \
+              -d KSU_KPROBES_KSUD \
+              -e KSU_HOSTSREDIRECT \
+              -e KSU_ENABLE_FULL_UID_CHECKS \
+              -e KSU_THRONE_TRACKER_ALWAYS_THREADED \
+              -d KSU_SHELL_HAS_SU_ALWAYS \
+              -d KSU_DEBUG
+            if [ "$KSU_LOGGING" = "true" ]; then
+              ./scripts/config --file "$CONFIG_FILE" -d KSU_NOPRINTK
+            else
+              ./scripts/config --file "$CONFIG_FILE" -e KSU_NOPRINTK
+            fi
+          else
+            ./scripts/config --file "$CONFIG_FILE" -d KSU
           fi
 
       - name: "Extract Kernel Version"
         id: extract_version
         working-directory: ${{ env.WORK_DIR }}/common
         run: |
-          K_VER=$(grep -m 1 '^VERSION =' Makefile | awk '{print $3}')
-          K_PATCH=$(grep -m 1 '^PATCHLEVEL =' Makefile | awk '{print $3}')
-          K_SUB=$(grep -m 1 '^SUBLEVEL =' Makefile | awk '{print $3}')
-          FULL_VER="${K_VER}.${K_PATCH}.${K_SUB}"
-          
-          echo "CI_VERSION=$FULL_VER" >> $GITHUB_OUTPUT
-          echo "CI_VERSION=$FULL_VER" >> $GITHUB_ENV
+          set -euo pipefail
+          FULL_VER=$(make -s kernelversion 2>/dev/null || true)
+          if [ -z "$FULL_VER" ]; then
+            K_VER=$(awk -F '=' '/^VERSION[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)
+            K_PATCH=$(awk -F '=' '/^PATCHLEVEL[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)
+            K_SUB=$(awk -F '=' '/^SUBLEVEL[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' Makefile)
+            FULL_VER="${K_VER}.${K_PATCH}.${K_SUB}"
+          fi
+          if [ -z "$FULL_VER" ] || [ "$FULL_VER" = ".." ]; then
+            echo "Failed to extract kernel version from Makefile." >&2
+            exit 1
+          fi
+          echo "CI_VERSION=$FULL_VER" >> "$GITHUB_OUTPUT"
+          echo "CI_VERSION=$FULL_VER" >> "$GITHUB_ENV"
           echo "Version Extracted: $FULL_VER"
 
-      - name: "Build Kernel"
+      - name: "Build Kernel (AOSP)"
+        if: github.event.inputs.buildToolchain == 'android-tools'
         working-directory: ${{ env.WORK_DIR }}
         run: |
-          LTO=${{ github.event.inputs.ltoType }} \
+          set -euo pipefail
+          cat > builder.config << EOF
+          DEFCONFIG=${DEFCONFIG_NAME}
+          CLANG_PREBUILT_BIN=prebuilts-master/clang/host/linux-x86/clang-r547379/bin
+          EOF
+          if [ "$OPT_LEVEL" = "O3" ]; then
+            echo 'KCFLAGS="${KCFLAGS} -O3"' >> builder.config
+          fi
+          LTO="$LTO_TYPE" \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
-          build/build.sh -j$(nproc --all)
+          BUILD_CONFIG_FRAGMENTS=builder.config \
+          build/build.sh -j"$(nproc --all)"
+
+      - name: "Build Kernel (Custom Toolchain)"
+        if: github.event.inputs.buildToolchain == 'custom-tools'
+        working-directory: ${{ env.WORK_DIR }}/common
+        run: |
+          set -euo pipefail
+          mkdir -p "../${OUT_DIR}/dist"
+          OUT_ABS="$(realpath "../${OUT_DIR}")"
+
+          KCFLAGS_VAL=""
+          if grep -q "__ANDROID_COMMON_KERNEL__" build.config.common 2>/dev/null; then
+            KCFLAGS_VAL="-D__ANDROID_COMMON_KERNEL__"
+          fi
+          if [ "$OPT_LEVEL" = "O3" ]; then
+            KCFLAGS_VAL="${KCFLAGS_VAL:+$KCFLAGS_VAL }-O3"
+          fi
+
+          MAKE_COMMON=(
+            -j"$(nproc --all)"
+            "O=${OUT_ABS}"
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          )
+          make "${MAKE_COMMON[@]}" "$DEFCONFIG_NAME"
+          if [ -n "$KCFLAGS_VAL" ]; then
+            make "${MAKE_COMMON[@]}" "KCFLAGS=${KCFLAGS_VAL}" Image
+          else
+            make "${MAKE_COMMON[@]}" Image
+          fi
+          cp -f "${OUT_ABS}/arch/arm64/boot/Image" "${OUT_ABS}/dist/Image"
 
       - name: "Prepare Artifact"
         run: |
+          set -euo pipefail
           mkdir -p output
-          cp workspace/out/dist/Image output/Image.${{ matrix.variant }} || cp out/dist/Image output/Image.${{ matrix.variant }}
+          IMAGE_PATH="${WORK_DIR}/${OUT_DIR}/dist/Image"
+          if [ ! -f "$IMAGE_PATH" ]; then
+            echo "Built Image not found at $IMAGE_PATH" >&2
+            exit 1
+          fi
+          cp -f "$IMAGE_PATH" "output/Image.${VARIANT}"
 
       - name: "Upload Build Artifact"
         uses: actions/upload-artifact@v4
@@ -236,11 +382,19 @@ jobs:
   package-release:
     name: "Release Packaging"
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: build-kernel
     permissions:
       contents: write
     env:
       CI_VERSION: ${{ needs.build-kernel.outputs.ci_version }}
+      KERNEL_DEVICE: ${{ github.event.inputs.kernelDevice }}
+      KERNEL_BRANCH: ${{ github.event.inputs.kernelBranch }}
+      BUILD_TOOLCHAIN: ${{ github.event.inputs.buildToolchain }}
+      LTO_TYPE: ${{ github.event.inputs.ltoType }}
+      OPT_LEVEL: ${{ github.event.inputs.optimizationLevel }}
+      TICK_RATE: ${{ github.event.inputs.tickRate }}
+      LOCAL_VERSION: ${{ github.event.inputs.localVersion }}
     steps:
       - name: "Download Built Kernels"
         uses: actions/download-artifact@v4
@@ -249,24 +403,45 @@ jobs:
 
       - name: "Create Variant Packages"
         run: |
-          set -e
-          echo "CURRENT_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+          set -euo pipefail
+          echo "CURRENT_DATE=$(date +'%Y-%m-%d')" >> "$GITHUB_ENV"
           git clone --depth=1 https://github.com/RapliVx/AnyKernel3.git -b GKI-5.10 ak3_base
+          rm -rf ak3_base/.git
           mkdir -p final_zips
-          
+
+          VARIANTS_MD=""
+          IDX=1
           for variant in vanilla ksu; do
-            if [ -d "./artifacts/kernel-$variant" ]; then
+            IMG="./artifacts/kernel-${variant}/Image.${variant}"
+            if [ -f "$IMG" ]; then
               echo "Packaging variant: $variant"
               cp -r ak3_base "ak3-$variant"
-              cp -f "./artifacts/kernel-$variant/Image.$variant" "ak3-$variant/Image"
-              
-              # ZIP it
+              cp -f "$IMG" "ak3-$variant/Image"
+
               ZIP_NAME="GKI-5.10-${CI_VERSION}-${variant^^}-$(date +'%Y%m%d').zip"
-              cd "ak3-$variant"
-              zip -r9 "../final_zips/$ZIP_NAME" * -x .git/* README.md
-              cd ..
+              (cd "ak3-$variant" && zip -r9 "../final_zips/$ZIP_NAME" . -x README.md)
+
+              if [ "$variant" = "vanilla" ]; then
+                VARIANTS_MD="${VARIANTS_MD}${IDX}. **Vanilla:** Standard Kernel."$'\n'
+              else
+                VARIANTS_MD="${VARIANTS_MD}${IDX}. **KSU:** KernelSU (xxksu)."$'\n'
+              fi
+              IDX=$((IDX + 1))
             fi
           done
+
+          shopt -s nullglob
+          ZIPS=(final_zips/*.zip)
+          if [ ${#ZIPS[@]} -eq 0 ]; then
+            echo "No kernel ZIP packages were generated." >&2
+            exit 1
+          fi
+
+          {
+            echo "VARIANTS_MD<<EOF"
+            printf '%s' "$VARIANTS_MD"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - name: "Push to GitHub Release"
         uses: softprops/action-gh-release@v2
@@ -275,38 +450,102 @@ jobs:
           tag_name: "Build-${{ github.run_number }}-${{ github.sha }}"
           name: "Kernel Build: ${{ env.CI_VERSION }}"
           body: |
-            ### 🛠️ Build Info
+            ### Build Info
             - **Date:** ${{ env.CURRENT_DATE }}
             - **Version:** `${{ env.CI_VERSION }}`
-            - **Device:** `${{ github.event.inputs.kernelDevice }}_defconfig`
-            - **Branch:** `${{ github.event.inputs.kernelBranch }}`
-            - **Compiler:** LTO: `${{ github.event.inputs.ltoType }}` | Opt: `${{ github.event.inputs.optimizationLevel }}`
-            
-            ### 📦 Variants
-            1. **Vanilla:** Standard Kernel.
-            2. **KSU:** KernelSU (xxksu).
+            - **Device:** `${{ env.KERNEL_DEVICE }}_defconfig`
+            - **Branch:** `${{ env.KERNEL_BRANCH }}`
+            - **Toolchain:** `${{ env.BUILD_TOOLCHAIN }}`
+            - **Compiler:** LTO `${{ env.LTO_TYPE }}` | Opt `${{ env.OPT_LEVEL }}` | Tick `${{ env.TICK_RATE }}`
+
+            ### Variants
+            ${{ env.VARIANTS_MD }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: "Send Telegram Status"
         if: success()
         run: |
-          cd final_zips
+          set -euo pipefail
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram secrets not configured; skipping notification."
+            exit 0
+          fi
+
+          shopt -s nullglob
           LIST=""
-          for f in *.zip; do LIST="${LIST}📦 <code>${f}</code>%0A"; done
-          
-          COMMIT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/Build-${{ github.run_number }}-${{ github.sha }}"
-          
-          MSG="<b>✅ GKI-5.10.x ${CI_VERSION}</b>%0A%0A"
-          MSG="${MSG}<b>📱 Device:</b> <code>${{ github.event.inputs.kernelDevice }}</code>%0A"
-          MSG="${MSG}<b>🌿 Branch:</b> <code>${{ github.event.inputs.kernelBranch }}</code>%0A"
-          MSG="${MSG}<b>⚙️ Compiler:</b> LTO: <code>${{ github.event.inputs.ltoType }}</code> | Opt: <code>${{ github.event.inputs.optimizationLevel }}</code>%0A"
-          MSG="${MSG}<b>📌 Commit:</b> <code>${COMMIT_SHA}</code>%0A%0A"
-          MSG="${MSG}<b>📦 Packages:</b>%0A${LIST}%0A"
-          MSG="${MSG}🔗 <a href='${RELEASE_URL}'>Download Release</a>"
-          
-          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ env.TELEGRAM_CHAT_ID }}" \
-            -d text="${MSG}" \
+          for f in final_zips/*.zip; do
+            NAME=$(python3 -c 'import html, os, sys; print(html.escape(os.path.basename(sys.argv[1])))' "$f")
+            LIST="${LIST}📦 <code>${NAME}</code>"$'\n'
+          done
+
+          ESC_DEVICE=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$KERNEL_DEVICE")
+          ESC_BRANCH=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$KERNEL_BRANCH")
+          ESC_TOOLCHAIN=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$BUILD_TOOLCHAIN")
+          ESC_LTO=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$LTO_TYPE")
+          ESC_OPT=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$OPT_LEVEL")
+          ESC_TICK=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$TICK_RATE")
+          ESC_LOCAL=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$LOCAL_VERSION")
+          COMMIT_SHA="${GITHUB_SHA:0:7}"
+          RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/Build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA}"
+
+          MSG="<b>✅ GKI-5.10.x ${CI_VERSION}</b>"$'\n\n'
+          MSG+="<b>Device:</b> <code>${ESC_DEVICE}_defconfig</code>"$'\n'
+          MSG+="<b>Branch:</b> <code>${ESC_BRANCH}</code>"$'\n'
+          if [ -n "$ESC_LOCAL" ]; then
+            MSG+="<b>Localversion:</b> <code>${ESC_LOCAL}</code>"$'\n'
+          fi
+          MSG+="<b>Toolchain:</b> <code>${ESC_TOOLCHAIN}</code>"$'\n'
+          MSG+="<b>Compiler:</b> LTO: <code>${ESC_LTO}</code> | Opt: <code>${ESC_OPT}</code> | Tick: <code>${ESC_TICK}</code>"$'\n'
+          MSG+="<b>Commit:</b> <code>${COMMIT_SHA}</code> (Run #${GITHUB_RUN_NUMBER})"$'\n\n'
+          MSG+="<b>Packages:</b>"$'\n'"${LIST}"$'\n'
+          MSG+="<a href='${RELEASE_URL}'>Download Release</a>"
+
+          curl -sfS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
             -d parse_mode="HTML" \
-            -d disable_web_page_preview=true
+            -d disable_web_page_preview=true \
+            --data-urlencode "text=$MSG" > /dev/null
+
+  notify-failure:
+    name: "Notify Failure"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [build-kernel, package-release]
+    if: ${{ always() && (needs.build-kernel.result == 'failure' || needs.package-release.result == 'failure') }}
+    env:
+      KERNEL_DEVICE: ${{ github.event.inputs.kernelDevice }}
+      KERNEL_BRANCH: ${{ github.event.inputs.kernelBranch }}
+      BUILD_TOOLCHAIN: ${{ github.event.inputs.buildToolchain }}
+      LTO_TYPE: ${{ github.event.inputs.ltoType }}
+      OPT_LEVEL: ${{ github.event.inputs.optimizationLevel }}
+      TICK_RATE: ${{ github.event.inputs.tickRate }}
+    steps:
+      - name: "Send Telegram Failure Alert"
+        run: |
+          set -euo pipefail
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram secrets not configured; skipping notification."
+            exit 0
+          fi
+
+          ESC_DEVICE=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$KERNEL_DEVICE")
+          ESC_BRANCH=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$KERNEL_BRANCH")
+          ESC_TOOLCHAIN=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$BUILD_TOOLCHAIN")
+          ESC_LTO=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$LTO_TYPE")
+          ESC_OPT=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$OPT_LEVEL")
+          ESC_TICK=$(python3 -c 'import html, sys; print(html.escape(sys.argv[1]))' "$TICK_RATE")
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          MSG="<b>❌ GKI-5.10.x Build Failed</b>"$'\n\n'
+          MSG+="<b>Device:</b> <code>${ESC_DEVICE}_defconfig</code>"$'\n'
+          MSG+="<b>Branch:</b> <code>${ESC_BRANCH}</code>"$'\n'
+          MSG+="<b>Toolchain:</b> <code>${ESC_TOOLCHAIN}</code>"$'\n'
+          MSG+="<b>Compiler:</b> LTO: <code>${ESC_LTO}</code> | Opt: <code>${ESC_OPT}</code> | Tick: <code>${ESC_TICK}</code>"$'\n'
+          MSG+="<b>Run:</b> #${GITHUB_RUN_NUMBER}"$'\n\n'
+          MSG+="<a href='${RUN_URL}'>View Workflow Logs</a>"
+
+          curl -sfS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
+            -d parse_mode="HTML" \
+            -d disable_web_page_preview=true \
+            --data-urlencode "text=$MSG" > /dev/null
