@@ -80,6 +80,11 @@ on:
           - "thin"
           - "full"
           - "none"
+      runKmiCheck:
+        description: "Run KMI symbol CRC check (KMI_function_symbols_test.py)"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   build-kernel:
@@ -93,6 +98,7 @@ jobs:
       clang_version: ${{ steps.extract_version.outputs.CLANG_VERSION }}
       kernel_release: ${{ steps.prepare_artifact.outputs.KERNEL_RELEASE }}
       build_start: ${{ steps.setup_env.outputs.BUILD_START }}
+      kmi_status: ${{ steps.kmi_check.outputs.KMI_STATUS }}
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +118,7 @@ jobs:
       OPT_LEVEL: ${{ github.event.inputs.optimizationLevel }}
       BUILD_TOOLCHAIN: ${{ github.event.inputs.buildToolchain }}
       LTO_TYPE: ${{ github.event.inputs.ltoType }}
+      RUN_KMI_CHECK: ${{ github.event.inputs.runKmiCheck }}
 
     steps:
       - name: "Setup Build Environment"
@@ -384,6 +391,54 @@ jobs:
           fi
           cp -f "${OUT_ABS}/arch/arm64/boot/Image" "${OUT_ABS}/dist/Image"
 
+      - name: "Run KMI Symbol Check"
+        id: kmi_check
+        if: github.event.inputs.runKmiCheck == 'true'
+        run: |
+          set -euo pipefail
+          KMI_SCRIPT="${WORK_DIR}/common/KMI_function_symbols_test.py"
+          ABI_XML="${WORK_DIR}/common/android/abi_gki_aarch64.xml"
+          SYMVERS_FILE=""
+          for candidate in \
+            "${WORK_DIR}/${OUT_DIR}/dist/vmlinux.symvers" \
+            "${WORK_DIR}/${OUT_DIR}/common/vmlinux.symvers" \
+            "${WORK_DIR}/${OUT_DIR}/vmlinux.symvers"; do
+            if [ -s "$candidate" ]; then
+              SYMVERS_FILE="$candidate"
+              break
+            fi
+          done
+
+          if [ ! -f "$KMI_SCRIPT" ]; then
+            echo "KMI_function_symbols_test.py not found at ${KMI_SCRIPT}; skipping KMI check."
+            echo "KMI_STATUS=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ ! -f "$ABI_XML" ] || [ -z "$SYMVERS_FILE" ]; then
+            echo "Missing KMI inputs (xml: ${ABI_XML}, symvers: ${SYMVERS_FILE:-not found}); skipping KMI check."
+            echo "KMI_STATUS=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! python3 -c "import lxml, rich" 2>/dev/null; then
+            sudo apt-get install -y --no-install-recommends python3-lxml python3-rich \
+              || python3 -m pip install --quiet --break-system-packages lxml rich
+          fi
+
+          # Pass explicit XML and symvers paths because builds output outside the kernel source tree.
+          echo "Running KMI check with ${ABI_XML} and ${SYMVERS_FILE}"
+          set +e
+          COLUMNS=140 python3 "$KMI_SCRIPT" "$ABI_XML" "$SYMVERS_FILE"
+          KMI_RC=$?
+          set -e
+
+          if [ "$KMI_RC" -eq 0 ]; then
+            echo "KMI_STATUS=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "KMI_STATUS=failed" >> "$GITHUB_OUTPUT"
+            exit "$KMI_RC"
+          fi
+
       - name: "Prepare Artifact"
         id: prepare_artifact
         run: |
@@ -437,6 +492,8 @@ jobs:
       OPT_LEVEL: ${{ github.event.inputs.optimizationLevel }}
       TICK_RATE: ${{ github.event.inputs.tickRate }}
       LOCAL_VERSION: ${{ github.event.inputs.localVersion }}
+      RUN_KMI_CHECK: ${{ github.event.inputs.runKmiCheck }}
+      KMI_STATUS: ${{ needs.build-kernel.outputs.kmi_status }}
       TRIGGER_ACTOR: ${{ github.actor }}
     steps:
       - name: "Download Built Kernels"
@@ -448,6 +505,17 @@ jobs:
         run: |
           set -euo pipefail
           echo "CURRENT_DATE=$(date +'%Y-%m-%d')" >> "$GITHUB_ENV"
+          if [ "${RUN_KMI_CHECK:-false}" != "true" ]; then
+            KMI_CHECK_TEXT="disabled"
+          elif [ "${KMI_STATUS:-}" = "skipped" ]; then
+            KMI_CHECK_TEXT="skipped (missing KMI files)"
+          elif [ -n "${KMI_STATUS:-}" ]; then
+            KMI_CHECK_TEXT="${KMI_STATUS}"
+          else
+            KMI_CHECK_TEXT="enabled"
+          fi
+          echo "KMI_CHECK_TEXT=${KMI_CHECK_TEXT}" >> "$GITHUB_ENV"
+
           git clone --depth=1 https://github.com/RapliVx/AnyKernel3.git -b GKI-5.10 ak3_base
           rm -rf ak3_base/.git
           mkdir -p final_zips
@@ -500,6 +568,7 @@ jobs:
             - **Branch:** `${{ env.KERNEL_BRANCH }}`
             - **Toolchain:** `${{ env.BUILD_TOOLCHAIN }}`
             - **Compiler:** LTO `${{ env.LTO_TYPE }}` | Opt `${{ env.OPT_LEVEL }}` | Tick `${{ env.TICK_RATE }}`
+            - **KMI Check:** `${{ env.KMI_CHECK_TEXT }}`
 
             ### Variants
             ${{ env.VARIANTS_MD }}
@@ -545,6 +614,8 @@ jobs:
           local_ver = os.environ.get("LOCAL_VERSION", "").strip()
           build_ksu = os.environ.get("BUILD_KSU", "")
           ksu_log = os.environ.get("KSU_LOGGING", "true")
+          run_kmi = os.environ.get("RUN_KMI_CHECK", "false")
+          kmi_status = os.environ.get("KMI_STATUS", "").strip()
           toolchain = os.environ.get("BUILD_TOOLCHAIN", "")
           clang_ver = os.environ.get("CLANG_VERSION", "").strip()
           lto = os.environ.get("LTO_TYPE", "")
@@ -569,6 +640,15 @@ jobs:
           else:
               log_state = "on" if ksu_log == "true" else "off"
               variant_line = f"<code>{esc(build_ksu)}</code> (xxksu, dmesg log: <code>{log_state}</code>)"
+
+          if run_kmi != "true":
+              kmi_line = "disabled"
+          elif kmi_status == "skipped":
+              kmi_line = "skipped (missing KMI files)"
+          elif kmi_status:
+              kmi_line = kmi_status
+          else:
+              kmi_line = "enabled"
 
           toolchain_line = f"<code>{esc(toolchain)}</code>"
           if clang_ver and clang_ver != "unknown":
@@ -605,6 +685,7 @@ jobs:
           lines.extend([
               f"• Device: <code>{esc(k_device)}_defconfig</code>",
               f"• Variants: {variant_line}",
+              f"• KMI Check: <code>{esc(kmi_line)}</code>",
               f"• Source: {format_source(k_url)} @ <code>{esc(k_branch)}</code> (<code>{esc(k_sha)}</code>)",
           ])
           if k_subj:
@@ -661,6 +742,8 @@ jobs:
       LTO_TYPE: ${{ github.event.inputs.ltoType }}
       OPT_LEVEL: ${{ github.event.inputs.optimizationLevel }}
       TICK_RATE: ${{ github.event.inputs.tickRate }}
+      RUN_KMI_CHECK: ${{ github.event.inputs.runKmiCheck }}
+      KMI_STATUS: ${{ needs.build-kernel.outputs.kmi_status }}
       TRIGGER_ACTOR: ${{ github.actor }}
     steps:
       - name: "Send Telegram Failure Alert"
@@ -702,6 +785,8 @@ jobs:
           local_ver = os.environ.get("LOCAL_VERSION", "").strip()
           build_ksu = os.environ.get("BUILD_KSU", "")
           ksu_log = os.environ.get("KSU_LOGGING", "true")
+          run_kmi = os.environ.get("RUN_KMI_CHECK", "false")
+          kmi_status = os.environ.get("KMI_STATUS", "").strip()
           toolchain = os.environ.get("BUILD_TOOLCHAIN", "")
           lto = os.environ.get("LTO_TYPE", "")
           opt = os.environ.get("OPT_LEVEL", "")
@@ -719,6 +804,7 @@ jobs:
               log_state = "on" if ksu_log == "true" else "off"
               variant_line = f"<code>{esc(build_ksu)}</code> (xxksu, dmesg log: <code>{log_state}</code>)"
 
+          kmi_failed = (kmi_status == "failed")
           failed_steps = []
           raw_jobs = os.environ.get("JOBS_JSON", "").strip()
           if raw_jobs:
@@ -732,6 +818,8 @@ jobs:
                               for s in job.get("steps", [])
                               if s.get("conclusion") == "failure"
                           ]
+                          if "Run KMI Symbol Check" in bad_steps:
+                              kmi_failed = True
                           if bad_steps:
                               for sname in bad_steps:
                                   failed_steps.append(f"  - <code>{esc(jname)}</code> -> <code>{esc(sname)}</code>")
@@ -740,6 +828,17 @@ jobs:
               except Exception:
                   pass
 
+          if run_kmi != "true":
+              kmi_line = "disabled"
+          elif kmi_failed:
+              kmi_line = "failed"
+          elif kmi_status == "skipped":
+              kmi_line = "skipped (missing KMI files)"
+          elif kmi_status == "passed":
+              kmi_line = "passed"
+          else:
+              kmi_line = "enabled (not reached)"
+
           run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
           lines = [
               "<b>❌ GKI-5.10 Build Failed</b>",
@@ -747,6 +846,7 @@ jobs:
               "<b>Build Config</b>",
               f"• Device: <code>{esc(k_device)}_defconfig</code>",
               f"• Variants: {variant_line}",
+              f"• KMI Check: <code>{esc(kmi_line)}</code>",
               f"• Source: {format_source(k_url)} @ <code>{esc(k_branch)}</code>",
           ]
           if local_ver:
